@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>合作申请 · 已提交</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --ok:#15803d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  .card { max-width:420px; margin:12vh auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:28px; text-align:center; }
+  h1 { font-size:18px; margin:0 0 8px; color:#4ade80; }
+  p { margin:6px 0; color:var(--muted); }
+  code { color:var(--text); background:#0c0e13; border:1px solid var(--line); border-radius:6px; padding:2px 8px; }
+</style>
+</head>
+<body>
+<section class="card">
+  <h1>提交成功</h1>
+  <p>我们会在 3 个工作日内联系你。</p>
+  <p>申请编号：<code id="id">—</code></p>
+</section>
+<script>
+document.getElementById("id").textContent =
+  new URLSearchParams(location.search).get("id") || "—";
+</script>
+</body>
+</html>

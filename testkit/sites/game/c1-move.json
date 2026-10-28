@@ -1,0 +1,33 @@
+{
+  "protocol_version": "0.1",
+  "kind": "interactive",
+  "goal": "按住右键把方块推到目标区",
+  "policy": {
+    "max_wall_ms": 20000,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "controller": {
+    "policy_version": 1,
+    "tick_hz": 30,
+    "start_url": "http://127.0.0.1:8766/game/",
+    "observe": {
+      "source": "js",
+      "script": "() => window.__gameState()",
+      "max_hz": 10
+    },
+    "goal": { "script": "(s) => s.x >= 120", "deadline_ms": 8000 },
+    "rules": [
+      {
+        "id": "hold-right",
+        "when": "s.x < 120",
+        "do": [{ "type": "key_down", "key": "ArrowRight" }],
+        "priority": 10
+      }
+    ],
+    "safety": {
+      "max_actions_per_sec": 30,
+      "max_duration_ms": 8000,
+      "release_all_on_exit": true
+    }
+  }
+}

@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>运营后台 · 订单</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#3b82f6; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  .card { max-width: 360px; margin: 12vh auto; background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; }
+  h1 { font-size:18px; margin:0 0 16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
+  input { width:100%; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background:#0c0e13; color:var(--text); font:inherit; }
+  input:focus { outline:2px solid var(--accent); outline-offset:0; border-color:transparent; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line); background:#20252e; color:var(--text); padding:9px 14px; }
+  button:hover { background:#262c36; }
+  #login-btn { width:100%; margin-top:18px; background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  #login-error { color:var(--bad); font-size:13px; margin:12px 0 0; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px; }
+  header { display:flex; align-items:baseline; gap:12px; margin-bottom:16px; }
+  header h1 { margin:0; }
+  #who { color:var(--muted); font-size:13px; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:16px; }
+  .chips { display:flex; gap:6px; }
+  .chip[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .toolbar label { margin:0; }
+  #q { width: 190px; }
+  #export { margin-left:auto; background:#15803d; border-color:#15803d; color:#fff; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  tr:last-child td { border-bottom:none; }
+  td.status-失败 { color:var(--bad); }
+  #count { color:var(--muted); font-size:13px; margin-top:10px; }
+  #list-error { color:var(--bad); font-size:13px; margin-top:6px; }
+  #audit { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+
+<section id="login" class="card">
+  <h1>运营后台登录</h1>
+  <form id="login-form" autocomplete="on">
+    <label for="user">用户名</label>
+    <input id="user" name="username" autocomplete="username">
+    <label for="pass">密码</label>
+    <input id="pass" name="password" type="password" autocomplete="current-password">
+    <button id="login-btn" type="submit">登录</button>
+    <p id="login-error" role="alert" hidden>用户名或密码错误</p>
+  </form>
+</section>
+
+<main id="app" hidden>
+  <header>
+    <h1>订单</h1>
+    <span id="who"></span>
+  </header>
+
+  <div class="toolbar">
+    <div class="chips" role="group" aria-label="状态筛选">
+      <button class="chip" data-status="all" aria-pressed="true">全部</button>
+      <button class="chip" data-status="失败" aria-pressed="false">失败</button>
+      <button class="chip" data-status="已支付" aria-pressed="false">已支付</button>
+      <button class="chip" data-status="待支付" aria-pressed="false">待支付</button>
+    </div>
+    <label for="q">搜索订单号</label>
+    <input id="q" placeholder="订单号或客户">
+    <button id="export">导出 CSV</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>订单号</th><th>客户</th><th>金额</th><th>状态</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p id="count"></p>
+  <p id="list-error" role="alert" hidden></p>
+  <p id="audit" role="status"></p>
+</main>
+
+<script>
+// Rows come from the server, not from a copy baked into the page: the server
+// is the truth the tests assert on, and injected request failures have to be
+// visible here or they are not really injected.
+const state = { status: "all", query: "", user: "" };
+let rows = [];
+
+// Session survives a browser restart the way a real single-page app's does:
+// the profile directory keeps localStorage, so a resumed task is still logged
+// in and still filtered the way it left off.
+const store = {
+  get(k) { try { return localStorage.getItem("admin." + k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("admin." + k, v); } catch {} },
+};
+
+// Chaos rules the harness (or a test) pushed via POST /admin/__chaos. Click
+// rules are handed to the page; request rules are enforced by the server.
+const chaosReady = fetch("/admin/__chaos")
+  .then(r => r.json())
+  .then(j => (j.rules || []))
+  .catch(() => []);
+let chaosRules = [];
+
+function chaosRuleFor(selector) {
+  const rule = chaosRules.find(
+    r => r.on === "click" && r.selector === selector && (r.times ?? 1) > 0);
+  return rule || null;
+}
+
+function fireRule(rule) {
+  rule.times = (rule.times ?? 1) - 1;
+  return fetch("/admin/__chaos/fire", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: rule.id }),
+  }).catch(() => {});
+}
+
+function showError(text) {
+  const el = document.getElementById("list-error");
+  el.textContent = text;
+  el.hidden = false;
+}
+
+function clearError() {
+  document.getElementById("list-error").hidden = true;
+}
+
+function enterApp(user) {
+  state.user = user;
+  document.getElementById("login").hidden = true;
+  document.getElementById("app").hidden = false;
+  document.getElementById("who").textContent = `已登录：${user}`;
+  document.getElementById("q").value = state.query;
+  load();
+}
+
+async function load() {
+  try {
+    const res = await fetch(`/admin/api/orders?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.query)}`);
+    if (!res.ok) {
+      showError(`加载失败（${res.status}）`);
+      return;
+    }
+    clearError();
+    rows = (await res.json()).orders;
+    render();
+  } catch {
+    showError("网络错误");
+  }
+}
+
+function render() {
+  document.getElementById("rows").innerHTML = rows.map(o =>
+    `<tr><td>${o.id}</td><td>${o.customer}</td><td>${o.amount}</td><td class="status-${o.status}">${o.status}</td></tr>`
+  ).join("");
+  document.getElementById("count").textContent = `共 ${rows.length} 条`;
+  document.querySelectorAll(".chip").forEach(c =>
+    c.setAttribute("aria-pressed", String(c.dataset.status === state.status)));
+}
+
+document.getElementById("login-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const user = document.getElementById("user").value.trim();
+  const pass = document.getElementById("pass").value;
+  if (user !== "admin" || pass !== "admin123") {
+    document.getElementById("login-error").hidden = false;
+    return;
+  }
+  store.set("user", user);
+  enterApp(user);
+});
+
+document.querySelectorAll(".chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    state.status = chip.dataset.status;
+    store.set("status", state.status);
+    render();
+    load();
+  });
+});
+
+document.getElementById("q").addEventListener("input", (e) => {
+  state.query = e.target.value;
+  store.set("query", state.query);
+  load();
+});
+
+document.getElementById("export").addEventListener("click", async () => {
+  chaosRules = await chaosReady;
+
+  const rule = chaosRuleFor("#export");
+  if (rule) {
+    await fireRule(rule);
+    if (rule.popup === "confirm" && !confirm(rule.message || "确定导出？")) return;
+    if (rule.popup === "alert") alert(rule.message || "请注意");
+  }
+
+  const name = `orders-${state.status === "all" ? "all" : state.status}.csv`;
+  let res;
+  try {
+    res = await fetch(`/admin/api/export?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.query)}`);
+  } catch {
+    showError("导出失败：网络错误");
+    return;
+  }
+  if (!res.ok) {
+    // A failed export must be visible as a failure, not as a silent no-op.
+    showError(`导出失败（${res.status}），请重试`);
+    return;
+  }
+  clearError();
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+
+  // Injected surprise: a blocking dialog right after the download starts. A
+  // harness that does not handle Page.javascriptDialogOpening hangs here.
+  if (new URLSearchParams(location.search).has("dialog")) {
+    setTimeout(() => alert("导出完成：" + name), 120);
+  }
+});
+
+// ?slow=1 makes the "audit" handshake take 3 s after load. That is the window
+// a kill-mid-task test needs, and it is a realistic slow backend, not a sleep
+// in the harness.
+if (new URLSearchParams(location.search).has("slow")) {
+  document.getElementById("audit").textContent = "审计中…";
+  setTimeout(() => {
+    document.getElementById("audit").textContent = "审计完成";
+    window.__auditDone = true;
+  }, 3000);
+}
+
+// Restore the session the page had on its last visit.
+const savedUser = store.get("user");
+if (savedUser) {
+  state.status = store.get("status") || "all";
+  state.query = store.get("query") || "";
+  enterApp(savedUser);
+}
+</script>
+</body>
+</html>

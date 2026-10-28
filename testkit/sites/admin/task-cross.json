@@ -1,0 +1,92 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "在后台提取订单，再到另一个站点提交合作申请（跨页面 6 步）",
+  "policy": {
+    "max_model_calls": 2,
+    "max_wall_ms": 90000,
+    "allowed_hosts": ["127.0.0.1"],
+    "observation": { "max_elements": 120 }
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "登录运营后台",
+      "actions": [
+        { "type": "navigate", "url": "http://127.0.0.1:8766/" },
+        { "type": "type", "target": { "role": "textbox", "name": "用户名" }, "text": "admin", "clear_first": true },
+        { "type": "type", "target": { "role": "textbox", "name": "密码" }, "text": "admin123", "clear_first": true },
+        { "type": "click", "target": { "role": "button", "name": "登录" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "button", "name": "导出 CSV" } },
+      "timeout_ms": 20000
+    },
+    {
+      "id": "s2",
+      "goal": "提取订单表",
+      "preconditions": [
+        { "type": "js", "script": "document.querySelectorAll('#rows tr').length === 6" }
+      ],
+      "actions": [
+        {
+          "type": "extract",
+          "name": "orders",
+          "script": "Array.from(document.querySelectorAll('#rows tr')).map(function(tr){var c=tr.querySelectorAll('td');return {order:c[0].textContent.trim(),customer:c[1].textContent.trim(),amount:c[2].textContent.trim(),status:c[3].textContent.trim()}})"
+        }
+      ],
+      "success": { "type": "js", "script": "document.querySelectorAll('#rows tr').length === 6" },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s3",
+      "goal": "换到申请表并填写姓名",
+      "actions": [
+        { "type": "navigate", "url": "http://127.0.0.1:8766/form/" },
+        { "type": "type", "target": { "role": "textbox", "name": "姓名" }, "text": "李雷", "clear_first": true }
+      ],
+      "success": {
+        "type": "js",
+        "script": "location.pathname.indexOf('/form/') === 0 && document.getElementById('name').value === '李雷'"
+      },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s4",
+      "goal": "填写邮箱并进入第二步",
+      "actions": [
+        { "type": "type", "target": { "role": "textbox", "name": "邮箱" }, "text": "lilei@example.com", "clear_first": true },
+        { "type": "click", "target": { "role": "button", "name": "下一步" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "textbox", "name": "公司名称" } },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s5",
+      "goal": "填写联系方式和角色并进入确认页",
+      "actions": [
+        { "type": "type", "target": { "role": "textbox", "name": "手机号" }, "text": "13900002222", "clear_first": true },
+        { "type": "type", "target": { "role": "textbox", "name": "公司名称" }, "text": "云栖数据", "clear_first": true },
+        { "type": "click", "target": { "role": "radio", "name": "经理" } },
+        { "type": "click", "target": { "role": "button", "name": "下一步" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "button", "name": "提交" } },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s6",
+      "goal": "同意条款并提交",
+      "actions": [
+        { "type": "click", "target": { "role": "checkbox", "name": "同意条款" } },
+        { "type": "click", "target": { "role": "button", "name": "提交" } }
+      ],
+      "success": {
+        "type": "all",
+        "of": [
+          { "type": "url_matches", "pattern": "*form/done*" },
+          { "type": "js", "script": "document.body.textContent.includes('提交成功')" }
+        ]
+      },
+      "timeout_ms": 20000
+    }
+  ]
+}

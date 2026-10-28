@@ -1,0 +1,33 @@
+{
+  "protocol_version": "0.1",
+  "kind": "interactive",
+  "goal": "一直按住方向键直到超时（用于验证超时后的输入释放）",
+  "policy": {
+    "max_wall_ms": 15000,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "controller": {
+    "policy_version": 1,
+    "tick_hz": 30,
+    "start_url": "http://127.0.0.1:8766/game/",
+    "observe": {
+      "source": "js",
+      "script": "() => window.__gameState()",
+      "max_hz": 10
+    },
+    "goal": { "script": "(s) => false", "deadline_ms": 1500 },
+    "rules": [
+      {
+        "id": "hold-forever",
+        "when": "s.x < 10000",
+        "do": [{ "type": "key_down", "key": "ArrowRight" }],
+        "priority": 10
+      }
+    ],
+    "safety": {
+      "max_actions_per_sec": 30,
+      "max_duration_ms": 1500,
+      "release_all_on_exit": true
+    }
+  }
+}

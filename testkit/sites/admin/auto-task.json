@@ -1,0 +1,13 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "登录后台，筛选失败订单，导出 CSV",
+  "mode": "auto",
+  "start_url": "http://127.0.0.1:8766/",
+  "policy": {
+    "max_model_calls": 2,
+    "max_wall_ms": 60000,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "steps": []
+}

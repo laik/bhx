@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Canvas Console</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0; padding: 24px; background: #f3f4f6; color: #111827;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 12px; }
+  canvas { display: block; width: 640px; height: 360px; background: #ffffff;
+           border: 1px solid #d1d5db; cursor: crosshair; }
+  /* Author `display:block` beats the UA's [hidden] rule; be explicit. */
+  canvas[hidden] { display: none; }
+  p { max-width: 640px; font-size: 13px; color: #4b5563; }
+  #dom-go {
+    display: block; margin: 0 0 16px; width: 160px; height: 48px;
+    border: 0; border-radius: 6px; background: #e5484d; color: #ffffff;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<h1>Canvas Console</h1>
+<button id="dom-go" type="button">Submit</button>
+<canvas id="scene" width="640" height="360" aria-hidden="true"></canvas>
+<p id="note">A drawing surface. Nothing here is a DOM button.</p>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const mode = q.get("mode") || "canvas";
+  const layout = q.get("layout") || "a";
+  const slow = q.get("slow") === "1";
+
+  const W = 640, H = 360;
+  const canvas = document.getElementById("scene");
+  const ctx = canvas.getContext("2d");
+  const domBtn = document.getElementById("dom-go");
+
+  // Positions are also asserted server-side; keep them in one place.
+  const BTN = layout === "b"
+    ? { x: 380, y: 250, w: 160, h: 56 }
+    : { x: 100, y: 70, w: 140, h: 48 };
+  const KNOB = { x: 140, y: 200, r: 22 };
+  const ZONE = { x: 440, y: 140, w: 120, h: 120 };
+
+  let clicks = 0;
+  let confirmed = false;
+  let lastClick = null;
+  const drags = [];
+  let drag = null;
+
+  // `hidden` would leave the element in the DOM and in querySelectorAll, which
+  // is exactly what B2 asserts against: remove it, do not hide it.
+  if (mode !== "dom") domBtn.remove();
+  canvas.hidden = mode === "dom";
+
+  // A control that exists in the DOM but has no layout box: the AX tree treats
+  // it as ignored, so a role/name locator cannot find it. The visible target
+  // is the one painted on the canvas.
+  if (q.get("ghost") === "1") {
+    const ghost = document.createElement("button");
+    ghost.type = "button";
+    ghost.textContent = "Legacy Submit";
+    ghost.style.display = "none";
+    document.body.appendChild(ghost);
+  }
+  document.getElementById("note").textContent = mode === "dom"
+    ? "A red submit button. It works."
+    : "A drawing surface. Nothing here is a DOM button.";
+
+  function inside(p, r) {
+    return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  }
+
+  function at(e) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) * (W / r.width),
+      y: (e.clientY - r.top) * (H / r.height),
+    };
+  }
+
+  function post(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
+
+    if (mode === "drag") {
+      ctx.fillStyle = "#16a34a";
+      ctx.fillRect(ZONE.x, ZONE.y, ZONE.w, ZONE.h);
+      ctx.strokeStyle = "#15803d";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(ZONE.x, ZONE.y, ZONE.w, ZONE.h);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "600 16px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("drop", ZONE.x + ZONE.w / 2, ZONE.y + ZONE.h / 2);
+
+      const kx = drag ? drag.end.x : KNOB.x;
+      const ky = drag ? drag.end.y : KNOB.y;
+      ctx.beginPath();
+      ctx.arc(kx, ky, KNOB.r, 0, Math.PI * 2);
+      ctx.fillStyle = "#2563eb";
+      ctx.fill();
+      ctx.strokeStyle = "#1d4ed8";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      return;
+    }
+
+    ctx.fillStyle = "#e5484d";
+    roundRect(BTN.x, BTN.y, BTN.w, BTN.h, 8);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "600 18px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Submit", BTN.x + BTN.w / 2, BTN.y + BTN.h / 2);
+
+    if (confirmed) {
+      ctx.fillStyle = "#16a34a";
+      ctx.font = "600 16px system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("confirmed", 24, 320);
+    }
+  }
+
+  canvas.addEventListener("click", (e) => {
+    if (mode !== "canvas") return;
+    const p = at(e);
+    const hit = inside(p, BTN);
+    clicks += 1;
+    lastClick = { x: p.x, y: p.y, hit, layout, mode };
+    post("/canvas/api/event", {
+      type: "click", source: "canvas", x: p.x, y: p.y, hit, layout, mode,
+    });
+    if (slow) {
+      // The button looks the same before and after; only the page state
+      // changes, and only after the server has accepted the action.
+      post("/canvas/api/action", { type: "click", x: p.x, y: p.y })
+        .then(() => { confirmed = true; draw(); });
+    }
+    draw();
+  });
+
+  canvas.addEventListener("mousedown", (e) => {
+    if (mode !== "drag" || e.button !== 0) return;
+    const p = at(e);
+    if (Math.hypot(p.x - KNOB.x, p.y - KNOB.y) <= KNOB.r + 8) {
+      drag = { start: p, end: p };
+    }
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    drag.end = at(e);
+    draw();
+  });
+
+  window.addEventListener("mouseup", (e) => {
+    if (!drag) return;
+    const p = at(e);
+    drag.end = p;
+    const ok = inside(p, ZONE);
+    const record = { start: drag.start, end: p, ok, layout: "drag" };
+    drags.push(record);
+    post("/canvas/api/event", { type: "drag", ...record });
+    drag = null;
+    draw();
+  });
+
+  domBtn.addEventListener("click", () => {
+    clicks += 1;
+    lastClick = { source: "dom", hit: true };
+    post("/canvas/api/event", { type: "click", source: "dom", hit: true });
+  });
+
+  window.__canvasState = () => ({
+    mode, layout, slow, clicks, confirmed, lastClick, drags,
+    semantics: document.querySelectorAll("button, [role=button], a[href], input, select, textarea").length,
+  });
+
+  draw();
+})();
+</script>
+</body>
+</html>

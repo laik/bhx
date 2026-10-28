@@ -1,0 +1,32 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "DOM 定位失败时就地改道到视觉，而不是让整个任务失败",
+  "policy": {
+    "max_wall_ms": 20000,
+    "max_model_calls": 2,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "打开带隐藏遗留按钮的画布页面",
+      "actions": [{ "type": "navigate", "url": "http://127.0.0.1:8766/canvas/?mode=canvas&layout=a&ghost=1" }],
+      "timeout_ms": 8000
+    },
+    {
+      "id": "s2",
+      "goal": "先按语义找 Legacy Submit（找不到），再改道视觉点击红色按钮",
+      "executor": "auto",
+      "fallback_visual": "the red button",
+      "actions": [
+        { "type": "click", "target": { "role": "button", "name": "Legacy Submit" } }
+      ],
+      "success": {
+        "type": "js",
+        "script": "window.__canvasState().clicks >= 1 && window.__canvasState().lastClick && window.__canvasState().lastClick.hit"
+      },
+      "timeout_ms": 8000
+    }
+  ]
+}

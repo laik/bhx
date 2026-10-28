@@ -1,0 +1,57 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "登录后台，筛选失败订单，导出 CSV，等待审计握手",
+  "policy": {
+    "max_model_calls": 2,
+    "max_wall_ms": 60000,
+    "allowed_hosts": ["127.0.0.1"],
+    "observation": { "max_elements": 120 }
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "登录运营后台",
+      "actions": [
+        { "type": "navigate", "url": "http://127.0.0.1:8766/?slow=1" },
+        { "type": "type", "target": { "role": "textbox", "name": "用户名" }, "text": "admin", "clear_first": true },
+        { "type": "type", "target": { "role": "textbox", "name": "密码" }, "text": "admin123", "clear_first": true },
+        { "type": "click", "target": { "role": "button", "name": "登录" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "button", "name": "导出 CSV" } },
+      "timeout_ms": 20000
+    },
+    {
+      "id": "s2",
+      "goal": "筛选失败订单",
+      "preconditions": [
+        { "type": "element_visible", "locator": { "role": "button", "name": "导出 CSV" } }
+      ],
+      "actions": [
+        { "type": "click", "target": { "role": "button", "name": "失败" } },
+        { "type": "type", "target": { "placeholder": "订单号或客户" }, "text": "100", "clear_first": true }
+      ],
+      "success": { "type": "js", "script": "document.querySelectorAll('#rows tr').length === 2" },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s3",
+      "goal": "导出筛选结果为 CSV",
+      "actions": [
+        { "type": "click", "target": { "role": "button", "name": "导出 CSV" } }
+      ],
+      "success": { "type": "download_completed", "filename_regex": "^orders-.*\\.csv$", "min_bytes": 20 },
+      "timeout_ms": 20000
+    },
+    {
+      "id": "s4",
+      "goal": "等待后台审计握手（约 3 秒）",
+      "preconditions": [
+        { "type": "js", "script": "!!window.__auditDone" }
+      ],
+      "actions": [],
+      "success": { "type": "js", "script": "document.querySelector('#audit').textContent === '审计完成'" },
+      "timeout_ms": 20000
+    }
+  ]
+}

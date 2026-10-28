@@ -1,0 +1,119 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "在弹窗和接口错误的干扰下完成导出",
+  "policy": {
+    "max_model_calls": 2,
+    "max_wall_ms": 90000,
+    "allowed_hosts": [
+      "127.0.0.1"
+    ],
+    "observation": {
+      "max_elements": 120
+    },
+    "accept_confirm": true
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "登录运营后台",
+      "actions": [
+        {
+          "type": "navigate",
+          "url": "http://127.0.0.1:8766/"
+        },
+        {
+          "type": "type",
+          "target": {
+            "role": "textbox",
+            "name": "用户名"
+          },
+          "text": "admin",
+          "clear_first": true
+        },
+        {
+          "type": "type",
+          "target": {
+            "role": "textbox",
+            "name": "密码"
+          },
+          "text": "admin123",
+          "clear_first": true
+        },
+        {
+          "type": "click",
+          "target": {
+            "role": "button",
+            "name": "登录"
+          }
+        }
+      ],
+      "success": {
+        "type": "element_visible",
+        "locator": {
+          "role": "button",
+          "name": "导出 CSV"
+        }
+      },
+      "timeout_ms": 20000
+    },
+    {
+      "id": "s2",
+      "goal": "筛选已支付订单",
+      "preconditions": [
+        {
+          "type": "element_visible",
+          "locator": {
+            "role": "button",
+            "name": "导出 CSV"
+          }
+        }
+      ],
+      "actions": [
+        {
+          "type": "click",
+          "target": {
+            "role": "button",
+            "name": "已支付"
+          }
+        }
+      ],
+      "success": {
+        "type": "js",
+        "script": "document.querySelectorAll('#rows tr').length === 3"
+      },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s3",
+      "goal": "导出 CSV（首次接口失败，弹窗确认后重试）",
+      "actions": [
+        {
+          "type": "click",
+          "target": {
+            "role": "button",
+            "name": "导出 CSV"
+          }
+        }
+      ],
+      "success": {
+        "type": "download_completed",
+        "filename_regex": "^orders-.*\\.csv$",
+        "min_bytes": 20
+      },
+      "retry": {
+        "max_attempts": 2,
+        "backoff_ms": 200
+      },
+      "timeout_ms": 8000,
+      "fail_when": [
+        {
+          "type": "element_visible",
+          "locator": {
+            "css": "#list-error"
+          }
+        }
+      ]
+    }
+  ]
+}

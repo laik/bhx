@@ -1,0 +1,30 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "在一个有正常语义的页面上，用截图定位红色提交按钮并点击",
+  "policy": {
+    "max_wall_ms": 20000,
+    "max_model_calls": 2,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "打开控制台页面",
+      "actions": [{ "type": "navigate", "url": "http://127.0.0.1:8766/canvas/?mode=dom" }],
+      "timeout_ms": 8000
+    },
+    {
+      "id": "s2",
+      "goal": "用视觉定位并点击红色提交按钮",
+      "preconditions": [
+        { "type": "js", "script": "document.querySelectorAll('button').length === 1" }
+      ],
+      "actions": [
+        { "type": "click", "target": { "visual": "the red submit button" } }
+      ],
+      "success": { "type": "js", "script": "window.__canvasState().clicks >= 1" },
+      "timeout_ms": 8000
+    }
+  ]
+}

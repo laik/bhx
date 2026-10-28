@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>采集者 · canvas 小游戏</title>
+<style>
+  :root { --ink:#111827; --muted:#6b7280; --line:#d1d5db; --bg:#f9fafb; --accent:#2563eb; }
+  body { margin:0; font:14px/1.6 -apple-system,"PingFang SC",sans-serif; color:var(--ink); background:var(--bg); }
+  main { max-width:640px; margin:24px auto; padding:0 16px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p.hint { color:var(--muted); margin:0 0 12px; }
+  canvas { display:block; border:1px solid var(--line); border-radius:8px; background:#fff; width:360px; height:240px; }
+  #hud { margin-top:8px; font-variant-numeric:tabular-nums; color:var(--muted); }
+  #hud b { color:var(--ink); font-weight:600; }
+  #log { margin-top:8px; font-size:12px; color:var(--muted); min-height:1.6em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>采集者</h1>
+  <p class="hint">方向键移动。目标是走到右边黄色区域（x ≥ 180）。状态每 250 ms 上报一次服务器。</p>
+  <canvas id="stage" width="360" height="240"></canvas>
+  <div id="hud">x <b id="hx">0</b> · y <b id="hy">0</b> · 点击 <b id="hc">0</b> · 按住 <b id="hk">—</b></div>
+  <div id="log"></div>
+</main>
+<script>
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const SIZE = 16;
+const SPEED = 260;          // px per second, deterministic enough for a test
+const GOAL_X = 180;
+
+const game = {
+  x: 40, y: 40,
+  clicks: 0,
+  lastClick: null,
+  keys: new Set(),
+  startedAt: performance.now(),
+};
+
+function state() {
+  return {
+    x: Math.round(game.x),
+    y: Math.round(game.y),
+    clicks: game.clicks,
+    lastClick: game.lastClick,
+    keys: [...game.keys].sort(),
+    goalReached: game.x >= GOAL_X,
+    at: Date.now(),
+  };
+}
+window.__gameState = state;
+
+function hud() {
+  const s = state();
+  document.getElementById("hx").textContent = s.x;
+  document.getElementById("hy").textContent = s.y;
+  document.getElementById("hc").textContent = s.clicks;
+  document.getElementById("hk").textContent = s.keys.length ? s.keys.join("+") : "—";
+}
+
+// Telemetry: the server is the source of truth for what actually happened.
+// sendBeacon, not fetch: the page may be closed right after a key_up (the
+// harness releases input and then shuts the browser down), and a normal fetch
+// would be canceled with it.
+function report() {
+  const body = JSON.stringify(state());
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon("/game/api/report", new Blob([body], { type: "application/json" }));
+  } else {
+    fetch("/game/api/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    }).catch(() => {});
+  }
+}
+
+const MOVE = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]);
+window.addEventListener("keydown", (e) => {
+  if (!MOVE.has(e.key)) return;
+  e.preventDefault();
+  game.keys.add(e.key);
+  hud(); report();
+});
+window.addEventListener("keyup", (e) => {
+  if (!MOVE.has(e.key)) return;
+  e.preventDefault();
+  game.keys.delete(e.key);
+  hud(); report();
+});
+
+canvas.addEventListener("mousedown", (e) => {
+  const r = canvas.getBoundingClientRect();
+  game.lastClick = {
+    x: Math.round((e.clientX - r.left) * (canvas.width / r.width)),
+    y: Math.round((e.clientY - r.top) * (canvas.height / r.height)),
+  };
+  game.clicks += 1;
+  document.getElementById("log").textContent =
+    `点击 (${game.lastClick.x}, ${game.lastClick.y})`;
+  hud(); report();
+});
+
+let last = performance.now();
+function tick(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); // a background tab must not teleport
+  last = now;
+  let dx = 0, dy = 0;
+  if (game.keys.has("ArrowLeft")) dx -= 1;
+  if (game.keys.has("ArrowRight")) dx += 1;
+  if (game.keys.has("ArrowUp")) dy -= 1;
+  if (game.keys.has("ArrowDown")) dy += 1;
+  if (dx && dy) { dx *= Math.SQRT1_2; dy *= Math.SQRT1_2; } // no diagonal speed bonus
+  game.x = Math.max(0, Math.min(canvas.width - SIZE, game.x + dx * SPEED * dt));
+  game.y = Math.max(0, Math.min(canvas.height - SIZE, game.y + dy * SPEED * dt));
+  draw();
+  requestAnimationFrame(tick);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Goal zone
+  ctx.fillStyle = "#fef3c7";
+  ctx.fillRect(GOAL_X, 0, canvas.width - GOAL_X, canvas.height);
+  ctx.strokeStyle = "#fbbf24";
+  ctx.strokeRect(GOAL_X + 0.5, 0.5, canvas.width - GOAL_X - 1, canvas.height - 1);
+  // Player
+  ctx.fillStyle = "#2563eb";
+  ctx.fillRect(game.x, game.y, SIZE, SIZE);
+}
+
+hud();
+requestAnimationFrame(tick);
+setInterval(report, 250);
+report();
+</script>
+</body>
+</html>

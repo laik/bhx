@@ -1,0 +1,30 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "布局改变后重新定位红色按钮（layout b，位置和尺寸都变了）",
+  "policy": {
+    "max_wall_ms": 20000,
+    "max_model_calls": 2,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "打开布局 b 的纯画布页面",
+      "actions": [{ "type": "navigate", "url": "http://127.0.0.1:8766/canvas/?mode=canvas&layout=b" }],
+      "timeout_ms": 8000
+    },
+    {
+      "id": "s2",
+      "goal": "在新的布局里重新识别红色按钮并点击",
+      "actions": [
+        { "type": "click", "target": { "visual": "the red button" } }
+      ],
+      "success": {
+        "type": "js",
+        "script": "window.__canvasState().layout === 'b' && window.__canvasState().clicks >= 1 && window.__canvasState().lastClick && window.__canvasState().lastClick.hit"
+      },
+      "timeout_ms": 8000
+    }
+  ]
+}

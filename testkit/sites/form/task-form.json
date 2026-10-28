@@ -1,0 +1,83 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "填写三步合作申请表并提交",
+  "policy": {
+    "max_model_calls": 2,
+    "max_wall_ms": 90000,
+    "allowed_hosts": ["127.0.0.1"],
+    "observation": { "max_elements": 120 }
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "打开申请表",
+      "actions": [
+        { "type": "navigate", "url": "http://127.0.0.1:8766/form/" }
+      ],
+      "success": { "type": "url_matches", "pattern": "*form/*" },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s2",
+      "goal": "填写姓名和邮箱",
+      "actions": [
+        { "type": "type", "target": { "role": "textbox", "name": "姓名" }, "text": "王小明", "clear_first": true },
+        { "type": "type", "target": { "role": "textbox", "name": "邮箱" }, "text": "wang@example.com", "clear_first": true }
+      ],
+      "success": {
+        "type": "js",
+        "script": "document.getElementById('name').value === '王小明' && document.getElementById('email').value === 'wang@example.com'"
+      },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s3",
+      "goal": "进入第二步",
+      "actions": [
+        { "type": "click", "target": { "role": "button", "name": "下一步" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "textbox", "name": "公司名称" } },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s4",
+      "goal": "填写手机号、公司和角色",
+      "actions": [
+        { "type": "type", "target": { "role": "textbox", "name": "手机号" }, "text": "13800001111", "clear_first": true },
+        { "type": "type", "target": { "role": "textbox", "name": "公司名称" }, "text": "蓝鲸科技", "clear_first": true },
+        { "type": "click", "target": { "role": "radio", "name": "工程师" } }
+      ],
+      "success": {
+        "type": "js",
+        "script": "document.getElementById('phone').value === '13800001111' && document.getElementById('company').value === '蓝鲸科技' && (document.querySelector('input[name=role]:checked')||{}).value === 'engineer'"
+      },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s5",
+      "goal": "进入确认页",
+      "actions": [
+        { "type": "click", "target": { "role": "button", "name": "下一步" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "button", "name": "提交" } },
+      "timeout_ms": 15000
+    },
+    {
+      "id": "s6",
+      "goal": "同意条款并提交",
+      "actions": [
+        { "type": "click", "target": { "role": "checkbox", "name": "同意条款" } },
+        { "type": "click", "target": { "role": "button", "name": "提交" } }
+      ],
+      "success": {
+        "type": "all",
+        "of": [
+          { "type": "url_matches", "pattern": "*form/done*" },
+          { "type": "js", "script": "document.body.textContent.includes('提交成功')" }
+        ]
+      },
+      "timeout_ms": 20000
+    }
+  ]
+}

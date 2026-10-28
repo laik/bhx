@@ -1,0 +1,77 @@
+{
+  "protocol_version": "0.1",
+  "kind": "interactive",
+  "goal": "玩 Chrome 小恐龙：读取 canvas 判断障碍距离，跳过随机出现的仙人掌，活满 20 秒",
+  "policy": {
+    "max_model_calls": 0,
+    "max_wall_ms": 30000,
+    "allow_irreversible": false,
+    "accept_confirm": false,
+    "allowed_hosts": [
+      "dino"
+    ],
+    "observation": {
+      "max_elements": 120,
+      "include_screenshot": false
+    },
+    "semantic_verify": null,
+    "trace_screenshots": false
+  },
+  "controller": {
+    "policy_version": 1,
+    "tick_hz": 30,
+    "start_url": "chrome://dino",
+    "observe": {
+      "source": "js",
+      "script": "(() => {\n  const st = window.__bhxDino || (window.__bhxDino = {t0: performance.now(), lastHash: -1, lastChange: performance.now(), prevNear: null, prevT: 0, speed: 0});\n  const now = performance.now();\n  const c = document.querySelector('canvas.runner-canvas');\n  if (!c) return {ready:false, stalled:true, elapsed_ms: now-st.t0, gap:null, trigger:70, airborne:false, speed:0};\n  const W=c.width, H=c.height;\n  const d=c.getContext('2d').getImageData(0,0,W,H).data;\n  const dark=(x,y)=>{const i=(y*W+x)*4;return d[i]<110&&d[i+1]<110&&d[i+2]<110&&d[i+3]>100;};\n  let h=0; for(let i=0;i<d.length;i+=137) h=(h*31+d[i])>>>0;\n  if (h !== st.lastHash) { st.lastHash=h; st.lastChange=now; }\n  let ground=-1, best=0;\n  for (let y=Math.floor(H*0.6); y<H; y++) {\n    let n=0; for (let x=0;x<W;x+=2) if (dark(x,y)) n++;\n    if (n>best) { best=n; ground=y; }\n  }\n  let dbot=0;\n  for (let y=0; y<ground-1; y++) for (let x=0; x<45; x++) if (dark(x,y) && y>dbot) dbot=y;\n  const bandTop = Math.max(0, Math.floor(ground*0.3));\n  const isObs = (x) => {\n    let n=0, top=H;\n    for (let y=bandTop; y<ground-6; y++) if (dark(x,y)) { n++; if (y<top) top=y; }\n    return (n>=3 && top<=ground-8) ? top : -1;\n  };\n  let nearest=null, nw=0, last=-999;\n  for (let x=70; x<W; x++) {\n    const top = isObs(x);\n    if (top >= 0) { if (nearest===null) nearest=x; last=x; nw=x-nearest+1; }\n    else if (nearest!==null && x-last > 3) break;\n  }\n  if (nw < 6) { nearest=null; nw=0; }\n  const airborne = dbot < ground-4;\n  if (nearest!==null && st.prevNear!==null && now-st.prevT>0) {\n    const dx = st.prevNear - nearest;\n    if (dx > 0 && dx < 120) st.speed = dx/(now-st.prevT)*1000;\n  }\n  st.prevNear = nearest; st.prevT = now;\n  const trigger = Math.max(45, (st.speed || 350) * 0.22 - 8);\n  return {ready:true, gap: nearest===null?null:nearest-42, nw,\n          airborne, stalled: now-st.lastChange>400,\n          elapsed_ms: now-st.t0, speed: Math.round(st.speed), trigger};\n})()",
+      "max_hz": 10
+    },
+    "goal": {
+      "script": "(s) => s.elapsed_ms >= 20000",
+      "deadline_ms": 25000
+    },
+    "rules": [
+      {
+        "id": "start-or-restart",
+        "when": "s.ready && s.stalled",
+        "do": [
+          {
+            "type": "key_down",
+            "key": "ArrowUp"
+          }
+        ],
+        "priority": 10,
+        "terminal": false
+      },
+      {
+        "id": "release",
+        "when": "s.ready && !s.stalled && !s.airborne && (s.gap === null || s.gap >= s.trigger)",
+        "do": [
+          {
+            "type": "key_up",
+            "key": "ArrowUp"
+          }
+        ],
+        "priority": 5,
+        "terminal": false
+      },
+      {
+        "id": "jump",
+        "when": "s.ready && !s.stalled && !s.airborne && s.gap !== null && s.gap < s.trigger",
+        "do": [
+          {
+            "type": "key_down",
+            "key": "ArrowUp"
+          }
+        ],
+        "priority": 20,
+        "terminal": false
+      }
+    ],
+    "safety": {
+      "max_actions_per_sec": 30,
+      "max_duration_ms": 22000,
+      "release_all_on_exit": true
+    }
+  }
+}

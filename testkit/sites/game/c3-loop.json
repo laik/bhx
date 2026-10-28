@@ -1,0 +1,49 @@
+{
+  "protocol_version": "0.1",
+  "kind": "interactive",
+  "goal": "先向右，再向下：根据页面状态切换按键",
+  "policy": {
+    "max_wall_ms": 20000,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "controller": {
+    "policy_version": 1,
+    "tick_hz": 30,
+    "start_url": "http://127.0.0.1:8766/game/",
+    "observe": {
+      "source": "js",
+      "script": "() => window.__gameState()",
+      "max_hz": 10
+    },
+    "goal": { "script": "(s) => s.x >= 120 && s.y >= 80", "deadline_ms": 8000 },
+    "rules": [
+      {
+        "id": "arrived",
+        "when": "s.x >= 120 && s.y >= 80",
+        "do": [{ "type": "key_up", "key": "ArrowDown" }],
+        "priority": 30,
+        "terminal": true
+      },
+      {
+        "id": "turn-down",
+        "when": "s.x >= 120 && s.y < 80",
+        "do": [
+          { "type": "key_up", "key": "ArrowRight" },
+          { "type": "key_down", "key": "ArrowDown" }
+        ],
+        "priority": 20
+      },
+      {
+        "id": "go-right",
+        "when": "s.x < 120",
+        "do": [{ "type": "key_down", "key": "ArrowRight" }],
+        "priority": 10
+      }
+    ],
+    "safety": {
+      "max_actions_per_sec": 30,
+      "max_duration_ms": 8000,
+      "release_all_on_exit": true
+    }
+  }
+}

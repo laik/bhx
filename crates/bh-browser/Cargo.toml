@@ -1,0 +1,15 @@
+[package]
+name = "bh-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+bh-cdp = { path = "../bh-cdp" }
+bh-core = { path = "../bh-core" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+ureq = { workspace = true }

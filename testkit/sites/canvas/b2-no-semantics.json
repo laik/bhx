@@ -1,0 +1,36 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "画布上没有可用的 DOM 语义，用截图定位红色按钮并点击",
+  "policy": {
+    "max_wall_ms": 20000,
+    "max_model_calls": 2,
+    "allowed_hosts": ["127.0.0.1"]
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "打开纯画布页面（layout a）",
+      "actions": [{ "type": "navigate", "url": "http://127.0.0.1:8766/canvas/?mode=canvas&layout=a" }],
+      "timeout_ms": 8000
+    },
+    {
+      "id": "s2",
+      "goal": "确认页面没有语义控件后，从截图定位红色按钮",
+      "preconditions": [
+        {
+          "type": "js",
+          "script": "document.querySelectorAll('button, [role=button], a[href], input, select, textarea').length === 0"
+        }
+      ],
+      "actions": [
+        { "type": "click", "target": { "visual": "the red button" } }
+      ],
+      "success": {
+        "type": "js",
+        "script": "window.__canvasState().clicks >= 1 && window.__canvasState().lastClick && window.__canvasState().lastClick.hit"
+      },
+      "timeout_ms": 8000
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>合作申请 · 第 2 步</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#3b82f6; --bad:#ef4444; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  .card { max-width:460px; margin:8vh auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .progress { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }
+  input { width:100%; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background:#0c0e13; color:var(--text); font:inherit; }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  .err { color:var(--bad); font-size:13px; margin:6px 0 0; }
+  .roles { display:flex; gap:8px; }
+  .roles label { display:flex; align-items:center; gap:8px; margin:0; padding:9px 12px; border:1px solid var(--line); border-radius:8px; color:var(--text); font-size:14px; cursor:pointer; }
+  .roles input { width:auto; margin:0; }
+  .roles label:has(input:checked) { border-color:var(--accent); }
+  .row { display:flex; gap:10px; margin-top:20px; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line); background:#20252e; color:var(--text); padding:9px 16px; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; margin-left:auto; }
+</style>
+</head>
+<body>
+<section class="card">
+  <h1>合作申请</h1>
+  <p class="progress">第 2 步 / 共 3 步 · 联系方式</p>
+  <form id="step2">
+    <label for="phone">手机号</label>
+    <input id="phone" name="phone" inputmode="numeric" autocomplete="tel">
+    <p class="err" id="err-phone" role="alert" hidden>手机号必须是 11 位，以 1 开头</p>
+
+    <label for="company">公司名称</label>
+    <input id="company" name="company" autocomplete="organization">
+    <p class="err" id="err-company" role="alert" hidden>请输入公司名称</p>
+
+    <label id="role-label">角色</label>
+    <div class="roles" role="radiogroup" aria-labelledby="role-label">
+      <label><input type="radio" name="role" value="engineer">工程师</label>
+      <label><input type="radio" name="role" value="manager">经理</label>
+      <label><input type="radio" name="role" value="other">其他</label>
+    </div>
+    <p class="err" id="err-role" role="alert" hidden>请选择角色</p>
+
+    <div class="row">
+      <button class="primary" id="next2" type="submit">下一步</button>
+    </div>
+  </form>
+</section>
+<script>
+const draft = {
+  load() { try { return JSON.parse(localStorage.getItem("form.draft") || "{}"); } catch { return {}; } },
+  save(v) { try { localStorage.setItem("form.draft", JSON.stringify(v)); } catch {} },
+};
+const data = draft.load();
+
+// The wizard has no session of its own; the draft is the session.
+if (!data.name || !data.email) {
+  location.replace("/form/");
+} else {
+  document.getElementById("phone").value = data.phone || "";
+  document.getElementById("company").value = data.company || "";
+  if (data.role) {
+    const r = document.querySelector(`input[name="role"][value="${data.role}"]`);
+    if (r) r.checked = true;
+  }
+}
+
+document.getElementById("step2").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const phone = document.getElementById("phone").value.trim();
+  const company = document.getElementById("company").value.trim();
+  const role = (document.querySelector('input[name="role"]:checked') || {}).value || "";
+  const phoneOk = /^1\d{10}$/.test(phone);
+
+  document.getElementById("err-phone").hidden = phoneOk;
+  document.getElementById("err-company").hidden = company !== "";
+  document.getElementById("err-role").hidden = role !== "";
+  if (!phoneOk || !company || !role) return;
+
+  draft.save({ ...data, phone, company, role });
+  location.href = "/form/review.html";
+});
+</script>
+</body>
+</html>

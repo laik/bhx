@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>合作申请 · 第 1 步</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#3b82f6; --bad:#ef4444; --ok:#15803d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  .card { max-width:460px; margin:8vh auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .progress { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }
+  input { width:100%; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background:#0c0e13; color:var(--text); font:inherit; }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  .err { color:var(--bad); font-size:13px; margin:6px 0 0; }
+  .row { display:flex; gap:10px; margin-top:20px; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line); background:#20252e; color:var(--text); padding:9px 16px; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; margin-left:auto; }
+</style>
+</head>
+<body>
+<section class="card">
+  <h1>合作申请</h1>
+  <p class="progress">第 1 步 / 共 3 步 · 基本信息</p>
+  <form id="step1">
+    <label for="name">姓名</label>
+    <input id="name" name="name" autocomplete="name">
+    <p class="err" id="err-name" role="alert" hidden>请输入姓名</p>
+
+    <label for="email">邮箱</label>
+    <input id="email" name="email" type="email" autocomplete="email">
+    <p class="err" id="err-email" role="alert" hidden>邮箱格式不正确</p>
+
+    <div class="row">
+      <button class="primary" id="next1" type="submit">下一步</button>
+    </div>
+  </form>
+</section>
+<script>
+// The draft lives in localStorage so a task resumed in a fresh browser does
+// not lose what was already typed — the same thing a real wizard does.
+const draft = {
+  load() { try { return JSON.parse(localStorage.getItem("form.draft") || "{}"); } catch { return {}; } },
+  save(v) { try { localStorage.setItem("form.draft", JSON.stringify(v)); } catch {} },
+};
+const data = draft.load();
+document.getElementById("name").value = data.name || "";
+document.getElementById("email").value = data.email || "";
+
+document.getElementById("step1").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const name = document.getElementById("name").value.trim();
+  const email = document.getElementById("email").value.trim();
+  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+
+  document.getElementById("err-name").hidden = name !== "";
+  document.getElementById("err-email").hidden = emailOk;
+  if (!name || !emailOk) return;
+
+  draft.save({ ...data, name, email });
+  location.href = "/form/step2.html";
+});
+</script>
+</body>
+</html>

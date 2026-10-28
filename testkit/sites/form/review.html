@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>合作申请 · 第 3 步</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#3b82f6; --bad:#ef4444; --ok:#15803d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  .card { max-width:480px; margin:8vh auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .progress { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  dl { display:grid; grid-template-columns: 90px 1fr; gap:8px 12px; margin:0 0 20px; }
+  dt { color:var(--muted); font-size:13px; }
+  dd { margin:0; }
+  .agree { display:flex; align-items:center; gap:8px; font-size:14px; }
+  .agree input { width:auto; margin:0; }
+  .err { color:var(--bad); font-size:13px; margin:8px 0 0; }
+  .row { display:flex; gap:10px; margin-top:20px; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line); background:#20252e; color:var(--text); padding:9px 16px; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; margin-left:auto; }
+  #server-errors { color:var(--bad); font-size:13px; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<section class="card">
+  <h1>合作申请</h1>
+  <p class="progress">第 3 步 / 共 3 步 · 确认提交</p>
+  <dl>
+    <dt>姓名</dt><dd id="rv-name"></dd>
+    <dt>邮箱</dt><dd id="rv-email"></dd>
+    <dt>手机号</dt><dd id="rv-phone"></dd>
+    <dt>公司</dt><dd id="rv-company"></dd>
+    <dt>角色</dt><dd id="rv-role"></dd>
+  </dl>
+  <label class="agree"><input type="checkbox" id="agree">同意条款</label>
+  <p class="err" id="err-agree" role="alert" hidden>请先同意条款</p>
+  <p id="server-errors" role="alert" hidden></p>
+  <div class="row">
+    <button class="primary" id="submit" type="button">提交</button>
+  </div>
+</section>
+<script>
+const ROLES = { engineer: "工程师", manager: "经理", other: "其他" };
+const draft = {
+  load() { try { return JSON.parse(localStorage.getItem("form.draft") || "{}"); } catch { return {}; } },
+  clear() { try { localStorage.removeItem("form.draft"); } catch {} },
+};
+const data = draft.load();
+if (!data.name || !data.phone || !data.company || !data.role) {
+  location.replace("/form/");
+} else {
+  document.getElementById("rv-name").textContent = data.name;
+  document.getElementById("rv-email").textContent = data.email;
+  document.getElementById("rv-phone").textContent = data.phone;
+  document.getElementById("rv-company").textContent = data.company;
+  document.getElementById("rv-role").textContent = ROLES[data.role] || data.role;
+}
+
+document.getElementById("submit").addEventListener("click", async () => {
+  const agree = document.getElementById("agree").checked;
+  document.getElementById("err-agree").hidden = agree;
+  document.getElementById("server-errors").hidden = true;
+  if (!agree) return;
+
+  const body = { ...data, agree: true };
+  let res, payload;
+  try {
+    res = await fetch("/form/api/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    payload = await res.json();
+  } catch {
+    document.getElementById("server-errors").textContent = "提交失败：网络错误，请重试";
+    document.getElementById("server-errors").hidden = false;
+    return;
+  }
+
+  if (!res.ok) {
+    // The server validates again; show what it said rather than guessing.
+    const errors = payload.errors || {};
+    document.getElementById("server-errors").textContent =
+      "提交被拒绝：" + Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join("；");
+    document.getElementById("server-errors").hidden = false;
+    return;
+  }
+
+  draft.clear();
+  location.href = `/form/done.html?id=${encodeURIComponent(payload.id)}`;
+});
+</script>
+</body>
+</html>

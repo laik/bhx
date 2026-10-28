@@ -1,0 +1,46 @@
+{
+  "protocol_version": "0.1",
+  "kind": "interactive",
+  "goal": "在画布上点击一次，落点要在目标点上",
+  "policy": {
+    "max_wall_ms": 15000,
+    "allowed_hosts": [
+      "127.0.0.1"
+    ]
+  },
+  "controller": {
+    "policy_version": 1,
+    "tick_hz": 30,
+    "start_url": "http://127.0.0.1:8766/game/",
+    "observe": {
+      "source": "js",
+      "script": "() => window.__gameState()",
+      "max_hz": 10
+    },
+    "goal": {
+      "script": "(s) => s.clicks >= 1",
+      "deadline_ms": 5000
+    },
+    "rules": [
+      {
+        "id": "click-target",
+        "when": "s.clicks < 1",
+        "do": [
+          {
+            "type": "click",
+            "target": {
+              "x": 400,
+              "y": 180
+            }
+          }
+        ],
+        "priority": 10
+      }
+    ],
+    "safety": {
+      "max_actions_per_sec": 30,
+      "max_duration_ms": 5000,
+      "release_all_on_exit": true
+    }
+  }
+}

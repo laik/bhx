@@ -1,0 +1,17 @@
+[package]
+name = "bh-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bh-action = { path = "../bh-action" }
+bh-browser = { path = "../bh-browser" }
+bh-core = { path = "../bh-core" }
+bh-model = { path = "../bh-model" }
+bh-observe = { path = "../bh-observe" }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

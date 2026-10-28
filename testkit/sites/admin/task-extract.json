@@ -1,0 +1,41 @@
+{
+  "protocol_version": "0.1",
+  "kind": "workflow",
+  "goal": "登录后台并提取订单表为结构化数据",
+  "policy": {
+    "max_model_calls": 2,
+    "max_wall_ms": 60000,
+    "allowed_hosts": ["127.0.0.1"],
+    "observation": { "max_elements": 120 }
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "goal": "登录运营后台",
+      "actions": [
+        { "type": "navigate", "url": "http://127.0.0.1:8766/" },
+        { "type": "type", "target": { "role": "textbox", "name": "用户名" }, "text": "admin", "clear_first": true },
+        { "type": "type", "target": { "role": "textbox", "name": "密码" }, "text": "admin123", "clear_first": true },
+        { "type": "click", "target": { "role": "button", "name": "登录" } }
+      ],
+      "success": { "type": "element_visible", "locator": { "role": "button", "name": "导出 CSV" } },
+      "timeout_ms": 20000
+    },
+    {
+      "id": "s2",
+      "goal": "提取订单表为结构化数据",
+      "preconditions": [
+        { "type": "js", "script": "document.querySelectorAll('#rows tr').length === 6" }
+      ],
+      "actions": [
+        {
+          "type": "extract",
+          "name": "orders",
+          "script": "Array.from(document.querySelectorAll('#rows tr')).map(function(tr){var c=tr.querySelectorAll('td');return {order:c[0].textContent.trim(),customer:c[1].textContent.trim(),amount:c[2].textContent.trim(),status:c[3].textContent.trim()}})"
+        }
+      ],
+      "success": { "type": "js", "script": "document.querySelectorAll('#rows tr').length === 6" },
+      "timeout_ms": 15000
+    }
+  ]
+}
