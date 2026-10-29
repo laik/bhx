@@ -58,6 +58,10 @@ pub struct Browser {
     targets: std::sync::Mutex<Vec<String>>,
 }
 
+/// A handle to one target. Cloning shares the same connection and the same
+/// tab — it is not a second session — so a helper running alongside the main
+/// loop (a strategy decider, say) can read the page without racing a borrow.
+#[derive(Clone)]
 pub struct Session {
     cdp: Arc<Cdp>,
     pub target_id: String,

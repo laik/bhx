@@ -180,7 +180,7 @@ MCP 注册（项目根 `.mcp.json` 或用户级配置）：
 | `crates/bh-task` | 任务引擎：SQLite 状态机、检查点、审批、产物索引、崩溃恢复、凭据剥离、空步骤自动规划 |
 | `crates/bh-server` | MCP stdio 服务 + REST/WS 入口（`bhx serve`），事件流可从存储续传 |
 | `crates/bhx` | CLI：`observe` / `run` / `task` / `plan` / `serve` / `mcp` |
-| `testkit/` | 本地测试站点与服务器（`server.py`）、验收脚本（`run-phase1.sh`–`run-phase4.sh`、`mcp-smoke.py`、`rest-smoke.py`、`plan-smoke.py`、`auto-plan-smoke.py`、`semantic-smoke.py`、`laya-smoke.py`、`interactive-smoke.py`、`session-smoke.py`、`repair-smoke.py`、`trace-stats-smoke.py`、`schedule-smoke.py`、`remote-smoke.py`、`dino-smoke.py`、`agent-acceptance.sh`、`check.py`）、模型替身（`vlm.py`、`planner.py`、`verifier.py`、`repairer.py`、`laya-stub.py`） |
+| `testkit/` | 本地测试站点与服务器（`server.py`）、验收脚本（`run-phase1.sh`–`run-phase4.sh`、`mcp-smoke.py`、`arbiter-smoke.py`、`decide-smoke.py`、`rest-smoke.py`、`plan-smoke.py`、`auto-plan-smoke.py`、`semantic-smoke.py`、`laya-smoke.py`、`interactive-smoke.py`、`session-smoke.py`、`repair-smoke.py`、`trace-stats-smoke.py`、`schedule-smoke.py`、`remote-smoke.py`、`dino-smoke.py`、`agent-acceptance.sh`、`check.py`）、模型替身（`vlm.py`、`planner.py`、`verifier.py`、`repairer.py`、`chooser.py`、`laya-stub.py`） |
 | `sidecars/laya/decide.py` | 本地决策模型 sidecar（torch/MPS，含 ready 握手） |
 | `spike/` | Phase 0 一次性验证代码（自建 CDP 客户端 + 延迟基线），不进入产品 |
 
@@ -261,7 +261,7 @@ Agent 可以现在就用 MCP 的 `browser_*` 自己决策，或用 `task_*` 把�
 REST 的页面级接口是 MCP `browser_*` 的镜像：`POST /v1/sessions` 建会话（可给
 `allowed_hosts`），再按 `session_id` 导航、观察、执行动作、判条件、求值、截图、关闭；
 每个会话独立浏览器与下载目录，批次失败返回 422 + 已执行到哪一步的日志。
-证据：`./testkit/run-phase4.sh` 十一组全绿——`rest-smoke.py` 22/22（创建 → 状态 →
+证据：`./testkit/run-phase4.sh` 十三组全绿——`rest-smoke.py` 22/22（创建 → 状态 →
 12 条事件 → CSV 产物 → 非 auto 空步骤 422 / auto 空步骤 202 后诚实失败 → 重复 id
 409 → 取消），`session-smoke.py` 47/47（建会话 → 导航 → 观察 → 输密码（观察里是 `***`）
 → 条件 → JS 双世界 → 白名单拒绝批次 → 下载落会话目录且哈希一致 → 双会话独立 → 关闭），
@@ -277,11 +277,16 @@ start_url → 计划落盘 → 执行 → 八类拒绝路径 → 磁盘/DB/事�
 `semantic-smoke.py` 62/62（achieved / not_achieved / uncertain 审批恢复 / 策略失败 /
 无适配器 / 坏阈值 → 截图与模型收到的字节同哈希 → 不开就不发、不落盘 → 回放器里能看到），
 `laya-smoke.py` 80/80（本地判定 → 审批 → 远程优先/回落 → 坏 choice 被拒 → 配置错误 →
-截图被诚实拒绝 → MCP 两次调用一个进程），`interactive-smoke.py` 40/40
+截图被诚实拒绝 → MCP 两次调用一个进程），`interactive-smoke.py` 42/42
 （后台启动 → 状态 → 页面确认按键被按住 → 热更新目标 → 陈旧版本被拒 → 停止无粘键 →
 谓词每 tick 一次往返 → 30 s soak 909 tick、p95 34 ms、CPU 3.6%、无粘键），
 `repair-smoke.py` 112/112（正常修复 → CSV 同哈希 / 修复后仍失败 / 非 read_only 不修 /
-九类违规提案被拒）；`mcp-smoke.py` 覆盖 Verify 三态与产物读取。
+九类违规提案被拒），`arbiter-smoke.py` 48/48（不启用时行为不变 → 两个同名按钮**不问模型直接放弃**
+→ 标签可区分时才仲裁、站点记录证明按的是被选中的那个 → 低于阈值/假 id/模型不可用/候选过多都退回原歧义错误
+且说明原因 → 每次仲裁都写进 `action.executed.arbitration` → 坏策略开工前拒绝），
+`decide-smoke.py` 29/29（模型每 1 s 选一次策略、规则照常 30 Hz 执行；**同一套规则**下
+模型选不同策略 → 站点记 **3 分 vs 0 分**；不启用即零调用；没配模型也能跑完且 `decisions: 0`；
+阈值/假 id/预算/坏策略各按契约处理）；`mcp-smoke.py` 覆盖 Verify 三态与产物读取。
 Phase 5 的第一个增量也落地了：目标与所有规则谓词合成一次 `Runtime.evaluate`，
 `interactive.stopped` 报告 `evals` 与 tick 间隔分位数；延迟预算见
 [benchmarks.md](docs/benchmarks.md#phase-5-延迟预算2026-10-28)。

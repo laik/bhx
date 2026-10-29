@@ -296,6 +296,9 @@ pub struct ResolvedTarget {
     pub bbox: Rect,
     pub strategy: &'static str,
     pub enabled: bool,
+    /// Set when a model picked this element out of several matches. Carried on
+    /// the target so every action that uses it can report the guess.
+    pub arbitration: Option<Arbitration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +312,12 @@ pub struct ActionResult {
     /// The value produced by an extract action. `None` for everything else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
+    /// Set when a model chose between several matching elements: what was
+    /// asked, which candidates were offered, what it picked and how sure it
+    /// was. An action that acted on a guess must be identifiable after the
+    /// fact, or a wrong click looks like a correct one in the trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arbitration: Option<serde_json::Value>,
 }
 
 impl ActionResult {
@@ -319,11 +328,17 @@ impl ActionResult {
             strategy: strategy.to_string(),
             elapsed_ms: 0,
             value: None,
+            arbitration: None,
         }
     }
 
     pub fn with_value(mut self, value: serde_json::Value) -> Self {
         self.value = Some(value);
+        self
+    }
+
+    pub fn with_arbitration(mut self, a: Option<Arbitration>) -> Self {
+        self.arbitration = a.map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null));
         self
     }
 
@@ -597,6 +612,88 @@ impl Default for ObservePolicy {
     }
 }
 
+/// What an arbiter decided, kept on the action so a guessed click is
+/// distinguishable from a named one after the fact.
+#[derive(Debug, Clone, Serialize)]
+pub struct Arbitration {
+    pub strategy: String,
+    pub eid: String,
+    pub model: String,
+    pub confidence: f64,
+    pub candidates: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Everything an arbiter is allowed to see: the locator as written, the exact
+/// observation the candidates came from, and the candidates in resolution
+/// order. An arbiter that re-observed the page could choose an element that
+/// was never in question.
+#[derive(Debug, Clone, Copy)]
+pub struct ArbitrationContext<'a> {
+    pub asked: &'a str,
+    pub observation: &'a Observation,
+    pub options: &'a [ElementInfo],
+    pub strategy: &'static str,
+}
+
+/// An arbiter's pick: an index into `options`, plus what it cost to decide.
+/// Indexed rather than by `eid` because DOM-level candidates have no element id.
+#[derive(Debug, Clone)]
+pub struct ArbiterChoice {
+    pub index: usize,
+    pub model: String,
+    pub confidence: f64,
+    pub reason: Option<String>,
+}
+
+/// An arbiter's answer. Declining carries a note because the three reasons to
+/// decline need different fixes — a locator the page cannot disambiguate, a
+/// guess below the floor, and an unreachable model are not the same problem,
+/// and the operator should not have to guess which one they hit.
+#[derive(Debug, Clone)]
+pub enum ArbitrationDecision {
+    Pick(ArbiterChoice),
+    Decline { note: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AmbiguityArbiter {
+    /// A pick below this is refused and the locator error stands as before.
+    /// Higher than the verify threshold on purpose: here a wrong answer acts
+    /// on the wrong element, it does not merely mislabel an outcome.
+    pub min_confidence: f64,
+    /// Candidate ceiling. Past this the choice set is too wide to be reliable
+    /// (a selector matching 500 nodes is a modelling error, not a question).
+    pub max_candidates: usize,
+}
+
+impl Default for AmbiguityArbiter {
+    fn default() -> Self {
+        Self { min_confidence: 0.7, max_candidates: 8 }
+    }
+}
+
+impl AmbiguityArbiter {
+    /// A misconfigured arbiter must not silently become a permissive one.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.min_confidence.is_finite() || !(0.0..=1.0).contains(&self.min_confidence) {
+            return Err(format!(
+                "arbitrate_ambiguous.min_confidence {} is outside 0..1",
+                self.min_confidence
+            ));
+        }
+        if self.max_candidates == 0 || self.max_candidates > 32 {
+            return Err(format!(
+                "arbitrate_ambiguous.max_candidates {} is outside 1..=32",
+                self.max_candidates
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Policy {
@@ -613,6 +710,13 @@ pub struct Policy {
     /// Off by default. Mechanical `success` conditions still apply; this asks
     /// one extra question about whether the result is actually right.
     pub semantic_verify: Option<SemanticVerify>,
+    /// When a locator matches several elements, ask a model to pick one instead
+    /// of failing. Off by default: "ambiguous means stop" is the safe reading,
+    /// and a model guessing between two similar controls is how the wrong button
+    /// gets pressed. When set, a pick below `min_confidence` still fails — the
+    /// only change is that a *confident* pick is allowed through, and it is
+    /// always recorded on the action event.
+    pub arbitrate_ambiguous: Option<AmbiguityArbiter>,
     /// Capture a JPEG of the page at the end of every step. Failed steps are
     /// captured regardless; this opts into the full sequence, which is what
     /// makes a trace replayable rather than just readable. Off by default:
@@ -630,6 +734,7 @@ impl Default for Policy {
             allowed_hosts: Vec::new(),
             observation: ObservePolicy::default(),
             semantic_verify: None,
+            arbitrate_ambiguous: None,
             trace_screenshots: false,
         }
     }
@@ -724,6 +829,12 @@ pub struct ControllerPolicy {
     /// configuration mistake, not a task.
     pub start_url: Option<String>,
     pub observe: ControllerObserve,
+    /// Optional: a model picks one of the named options at a low rate, and the
+    /// chosen id appears in the sampled state as `s.d`. Rules then branch on
+    /// it. This is the only place a model is allowed inside a controller loop,
+    /// and it is deliberately not per-tick: a local decision model costs a few
+    /// hundred ms, a 30 Hz loop has 33.
+    pub decide: Option<ControllerDecide>,
     pub goal: ControllerGoal,
     pub rules: Vec<ControlRule>,
     pub safety: SafetyPolicy,
@@ -736,6 +847,7 @@ impl Default for ControllerPolicy {
             tick_hz: 30,
             start_url: None,
             observe: ControllerObserve::default(),
+            decide: None,
             goal: ControllerGoal::default(),
             rules: Vec::new(),
             safety: SafetyPolicy::default(),
@@ -757,6 +869,118 @@ impl Default for ControllerObserve {
     fn default() -> Self {
         Self { source: "js".into(), script: String::new(), max_hz: 10 }
     }
+}
+
+/// A low-frequency model decision. The options are authored, not discovered:
+/// the model chooses between strategies the task author already wrote rules
+/// for, so an unexpected answer cannot invent behaviour the policy does not
+/// handle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ControllerDecide {
+    /// What the model is asked, in the author's words.
+    pub question: String,
+    /// `id` is what rules compare against (`s.d === "…"`); `description` is
+    /// what the model reads. At least two options.
+    pub options: Vec<DecisionOption>,
+    /// How often to ask, in ms. Clamped up: asking more often than the model
+    /// can answer just produces stale decisions and a wasted call.
+    pub every_ms: u64,
+    /// Below this the previous decision is kept rather than replaced.
+    pub min_confidence: f64,
+    /// A higher bar for **changing** strategy than for confirming it. Absent
+    /// means no hysteresis: one confident-enough answer replaces the current.
+    ///
+    /// This exists because of a measured failure, not as general hardening: in
+    /// the plane scenario Laya chose correctly on the first round and then
+    /// switched away before the scoring window opened — three runs, three lost
+    /// games. A static probe showed why one threshold cannot catch that: the
+    /// same state and the same correct answer scored 0.690 in one option order
+    /// and 0.511 in another, so a switch routinely clears a lone floor for
+    /// reasons that have nothing to do with the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_confidence: Option<f64>,
+}
+
+impl Default for ControllerDecide {
+    fn default() -> Self {
+        Self {
+            question: String::new(),
+            options: Vec::new(),
+            every_ms: 1_000,
+            min_confidence: 0.5,
+            switch_confidence: None,
+        }
+    }
+}
+
+impl ControllerDecide {
+    /// Checked before the job starts, and again on a live policy update: an
+    /// option list of one is not a decision, and a sub-100 ms cadence cannot
+    /// be honoured by any model we have measured.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.question.trim().is_empty() {
+            return Err("controller.decide.question is empty".into());
+        }
+        if self.options.len() < 2 {
+            return Err(format!(
+                "controller.decide needs at least two options (got {}); \
+                 with one there is nothing to ask",
+                self.options.len()
+            ));
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for o in &self.options {
+            if o.id.trim().is_empty() {
+                return Err("controller.decide.options has an empty id".into());
+            }
+            if !o.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return Err(format!(
+                    "decision id {:?} must be [A-Za-z0-9_-]+: it appears in rule predicates",
+                    o.id
+                ));
+            }
+            if o.description.trim().is_empty() {
+                return Err(format!("decision option {:?} has no description", o.id));
+            }
+            if seen.contains(&o.id.as_str()) {
+                return Err(format!("duplicate decision id {:?}", o.id));
+            }
+            seen.push(o.id.as_str());
+        }
+        if !(0.0..=1.0).contains(&self.min_confidence) || !self.min_confidence.is_finite() {
+            return Err(format!(
+                "controller.decide.min_confidence {} is outside 0..1",
+                self.min_confidence
+            ));
+        }
+        if let Some(sw) = self.switch_confidence {
+            if !sw.is_finite() || !(0.0..=1.0).contains(&sw) {
+                return Err(format!(
+                    "controller.decide.switch_confidence {sw} is outside 0..1"
+                ));
+            }
+            if sw < self.min_confidence {
+                return Err(format!(
+                    "controller.decide.switch_confidence {sw} is below min_confidence {}; \
+                     hysteresis has to be the stricter of the two or it does nothing",
+                    self.min_confidence
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The rate decisions are asked at, floored to something a model can meet.
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.every_ms.max(250))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionOption {
+    pub id: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -972,6 +1196,124 @@ mod tests {
             }],
         };
         assert!(obs.to_state_text("do it").contains("e1  button \"Export\""));
+    }
+
+    fn decide(question: &str, opts: &[(&str, &str)], floor: f64) -> ControllerDecide {
+        ControllerDecide {
+            question: question.into(),
+            options: opts
+                .iter()
+                .map(|(id, d)| DecisionOption { id: (*id).into(), description: (*d).into() })
+                .collect(),
+            every_ms: 1000,
+            min_confidence: floor,
+            switch_confidence: None,
+        }
+    }
+
+    #[test]
+    fn deciding_is_off_unless_the_author_asks_for_it() {
+        let p: ControllerPolicy = serde_json::from_str(
+            r#"{"tick_hz":30,"observe":{"script":"x"},"goal":{"script":"y"},"rules":[]}"#,
+        )
+        .unwrap();
+        assert!(p.decide.is_none(), "a rule-only controller is the default");
+    }
+
+    #[test]
+    fn a_decision_needs_at_least_two_real_options() {
+        assert!(decide("which lane?", &[("left", "the left lane")], 0.5)
+            .validate()
+            .unwrap_err()
+            .contains("at least two"));
+        assert!(decide("", &[("left", "a"), ("right", "b")], 0.5)
+            .validate()
+            .unwrap_err()
+            .contains("question is empty"));
+        assert!(decide("q", &[("left", ""), ("right", "b")], 0.5)
+            .validate()
+            .unwrap_err()
+            .contains("no description"));
+        assert!(decide("q", &[("left", "a"), ("left", "b")], 0.5)
+            .validate()
+            .unwrap_err()
+            .contains("duplicate"));
+        assert!(decide("q", &[("left", "a"), ("right", "b")], 1.5)
+            .validate()
+            .unwrap_err()
+            .contains("outside 0..1"));
+    }
+
+    #[test]
+    fn an_option_id_must_survive_being_written_into_a_predicate() {
+        // Rules compare against `s.d`, so an id with a quote or a space would
+        // produce a predicate that cannot parse — caught at submit, not at tick.
+        for bad in ["left lane", "left'x", "左", "left;drop"] {
+            let e = decide("q", &[(bad, "a"), ("right", "b")], 0.5)
+                .validate()
+                .unwrap_err();
+            assert!(e.contains("must be [A-Za-z0-9_-]+"), "{bad:?} -> {e}");
+        }
+        assert!(decide("q", &[("cover-left_2", "a"), ("right", "b")], 0.5)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn an_asked_cadence_below_what_any_model_can_meet_is_raised_not_honoured() {
+        // 10 ms asks are a plausible typo; running them would only ever reuse
+        // the previous answer. Clamping keeps the intent, drops the fiction.
+        assert_eq!(decide("q", &[("a", "1"), ("b", "2")], 0.5).interval().as_millis(), 1000);
+        assert_eq!(
+            ControllerDecide { every_ms: 10, ..decide("q", &[("a", "1"), ("b", "2")], 0.5) }
+                .interval()
+                .as_millis(),
+            250
+        );
+    }
+
+    #[test]
+    fn hysteresis_must_be_the_stricter_of_the_two_floors() {
+        // A switch floor below the confirm floor is not hysteresis; it is a
+        // second, looser gate that can never bind. Refusing it at submit beats
+        // a task silently doing nothing the author thinks it asked for.
+        let e = ControllerDecide {
+            switch_confidence: Some(0.3),
+            ..decide("q", &[("left", "a"), ("right", "b")], 0.6)
+        }
+        .validate()
+        .unwrap_err();
+        assert!(e.contains("stricter of the two"), "{e}");
+        assert!(e.contains("0.3") && e.contains("0.6"), "names both numbers: {e}");
+
+        let e = ControllerDecide {
+            switch_confidence: Some(1.5),
+            ..decide("q", &[("left", "a"), ("right", "b")], 0.6)
+        }
+        .validate()
+        .unwrap_err();
+        assert!(e.contains("switch_confidence") && e.contains("outside 0..1"), "{e}");
+
+        // Equal is allowed: it means "a switch needs at least as much
+        // conviction as staying", which is a weaker but coherent policy.
+        assert!(ControllerDecide {
+            switch_confidence: Some(0.6),
+            ..decide("q", &[("left", "a"), ("right", "b")], 0.6)
+        }
+        .validate()
+        .is_ok());
+        assert!(ControllerDecide {
+            switch_confidence: Some(0.9),
+            ..decide("q", &[("left", "a"), ("right", "b")], 0.6)
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn a_controller_policy_defaults_to_no_decisions_at_all() {
+        let p = ControllerPolicy::default();
+        assert!(p.decide.is_none(), "rule-only controllers stay the default");
     }
 
     fn spec_from(json: &str) -> TaskSpec {

@@ -224,6 +224,51 @@ pub async fn verify(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocateReport {
+    /// One of the candidate ids that were offered, or `None` if the model
+    /// answered without picking one. The caller still has to map it.
+    pub choice: Option<String>,
+    pub confidence: f64,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Ask a model to pick one of a fixed set of candidates for the current task.
+///
+/// The candidates are the whole question: the model may not invent an id (the
+/// router already rejects one that is not in `criteria`), and nothing here
+/// decides whether the pick is *good enough* — that is the caller's threshold,
+/// because a locator arbitration and a next-action suggestion are not equally
+/// safe places to be wrong.
+pub async fn locate(
+    router: &ModelRouter,
+    goal: &str,
+    state: &str,
+    instruction: &str,
+    candidates: Vec<(String, String)>,
+) -> Result<LocateReport> {
+    if candidates.is_empty() {
+        return Err(BhError::Other("locate was given no candidates".into()));
+    }
+    if state.trim().is_empty() {
+        return Err(BhError::Other("locate was given no page state".into()));
+    }
+    let mut req = ModelRequest::locate(goal, state, candidates);
+    if !instruction.trim().is_empty() {
+        req.instructions = format!("{goal}
+{instruction}");
+    }
+    let p = router.propose(&req).await?;
+    Ok(LocateReport {
+        choice: p.choice,
+        confidence: p.confidence,
+        model: p.model,
+        reason: p.reason,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairReport {
     pub step: Step,
     pub confidence: f64,
@@ -267,6 +312,15 @@ pub trait ModelAdapter: Send + Sync {
     fn name(&self) -> &str;
     fn supports(&self, capability: Capability) -> bool;
     async fn propose(&self, req: &ModelRequest) -> Result<ModelProposal>;
+
+    /// Make the adapter ready to answer *now*, if that costs anything. A
+    /// remote endpoint has nothing to do; a local sidecar has seconds of model
+    /// load. Returning an error does not fail the task — an adapter that
+    /// cannot warm up may still answer, and a warm-up failure must not look
+    /// like a decision failure.
+    async fn warm(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Per-task budget and validation in front of every adapter.
@@ -318,6 +372,22 @@ impl ModelRouter {
             None => adapters = remote,
         }
         Self::new(adapters, budget)
+    }
+
+    /// Load whatever a model call would need, before anything depends on the
+    /// answer. For a strategy loop this is not an optimisation: a 4.4 s sidecar
+    /// load paid at the first question lands after the window the decision was
+    /// for. Adapters that fail to warm are reported and left in place; the
+    /// first real call will surface the same error with its full context.
+    pub async fn warm(&self, capability: Capability) -> Vec<String> {
+        let mut failures = Vec::new();
+        for adapter in self.adapters.iter().filter(|a| a.supports(capability)) {
+            if let Err(e) = adapter.warm().await {
+                tracing::warn!(model = adapter.name(), error = %e, "model warm-up failed");
+                failures.push(format!("{}: {e}", adapter.name()));
+            }
+        }
+        failures
     }
 
     pub fn calls(&self) -> u32 {

@@ -22,6 +22,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::watch;
 
+use crate::vision::Vision;
+
 /// How many consecutive evaluation failures mean the page is not what the
 /// policy thinks it is. A single bad sample is noise; a run of them is a bug.
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
@@ -59,8 +61,42 @@ pub struct ControllerOutcome {
     /// Which policy version the loop was running when it stopped. Lets a
     /// caller that sent updates see whether the last one was adopted.
     pub policy_version: u64,
+    /// How many times the model was asked and its answer accepted. A
+    /// controller that decides often is a controller reacting slowly, and this
+    /// is the number that says so.
+    pub decisions: u64,
+    /// Every round of asking, accepted or not. A count alone cannot be read:
+    /// "2 accepted" might be one strategy confirmed twice or an argument the
+    /// loop lost five times on the way.
+    /// Per-rule activity, in the order the rules first fired. The aggregate
+    /// `actions` cannot tell 20 jumps from 19 jumps plus a crash-and-restart —
+    /// both are two key events apart. This can.
+    pub decision_log: Vec<DecisionRecord>,
+    pub rules: Vec<RuleActivity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// How often one rule's actions were dispatched, and how many actions that
+/// cost. A rule fires on entry, so `entries` is the meaningful count: one jump,
+/// one restart, one release.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleActivity {
+    pub id: String,
+    pub entries: u64,
+    pub actions: u64,
+}
+
+/// Count activity for `id`, appending the entry the first time it fires. A
+/// policy update that renames a rule starts a new entry rather than merging.
+fn bump(rules: &mut Vec<RuleActivity>, id: &str, actions: u64) {
+    match rules.iter_mut().find(|r| r.id == id) {
+        Some(r) => {
+            r.entries += 1;
+            r.actions += actions;
+        }
+        None => rules.push(RuleActivity { id: id.to_string(), entries: 1, actions }),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +106,168 @@ pub struct TickSummary {
     pub actions: u64,
     pub elapsed_ms: u64,
     pub policy_version: u64,
+}
+
+/// A decision the model made about which strategy the rules should follow.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerDecision {
+    pub id: String,
+    pub confidence: f64,
+    /// What the model said why, kept verbatim. Some backends put their own
+    /// timings in here (the local sidecar reports its inference ms), which is
+    /// how "the model was slow" is told apart from "the plumbing was slow".
+    pub reason: Option<String>,
+    pub model: String,
+    /// Set by the asker from the page clock; unused by the loop, which stamps
+    /// its own elapsed time so the log lines up with tick summaries.
+    /// Page clock when the round was asked (the page's timeline decides
+    /// whether a strategy arrived in time), and the model's own latency.
+    pub asked_at_ms: u64,
+    pub model_ms: u64,
+    /// Which policy version's option list produced this. A policy update that
+    /// renames an option invalidates an in-flight decision.
+    pub policy_version: u64,
+}
+
+/// One round of asking, accepted or not. `decisions` alone cannot be read as
+/// "the strategy held": two accepted answers might be the same strategy twice,
+/// and a run with zero accepted answers might have had five rejected ones.
+/// This is the log that makes the difference visible.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecisionRecord {
+    /// Page clock at the moment the question was asked.
+    pub asked_at_ms: u64,
+    /// Model latency for this round.
+    pub model_ms: u64,
+    /// When the loop acted on (or refused) it, on the task clock.
+    pub applied_at_ms: u64,
+    pub id: String,
+    pub confidence: f64,
+    pub model: String,
+    pub applied: bool,
+    /// The strategy in force when this answer arrived (`null` on the first).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Runs the model beside the loop, never inside it.
+///
+/// A measured local decision costs 150–500 ms and a 30 Hz tick has 33. Asking
+/// in-line would starve the controller; asking per tick would also spend a
+/// budget the task does not have. So this task samples the page on its own
+/// schedule, asks at most one question at a time, and publishes whatever it
+/// learned. The loop applies the newest value and keeps running with the
+/// previous one in the meantime — a stale strategy is a slow reaction, which
+/// is a different failure from a stopped loop.
+pub async fn decision_task(
+    session: &Session,
+    mut policy: watch::Receiver<ControllerPolicy>,
+    mut cancel: watch::Receiver<bool>,
+    vision: Arc<Vision>,
+    out: tokio::sync::mpsc::UnboundedSender<ControllerDecision>,
+) {
+    // Pay the model's start-up cost before the first question, not inside it.
+    // Measured: the local sidecar loads in 4.4 s, and paid on the first ask
+    // that delay lands after the moment the decision was meant to act on —
+    // a game decided in the first five seconds loses before the strategy
+    // exists. Failures are logged and ignored: a model that cannot warm up may
+    // still answer, and that error belongs to the call that needs it.
+    vision.warm_for_decisions().await;
+
+    loop {
+        if *cancel.borrow() {
+            return;
+        }
+        // Wait for a policy that asks for decisions. A policy with no `decide`
+        // is the common case and must cost nothing.
+        let cfg = loop {
+            let candidate = policy.borrow().clone();
+            if candidate.decide.is_some() {
+                break candidate;
+            }
+            if policy.changed().await.is_err() || *cancel.borrow() {
+                return;
+            }
+        };
+        let decide = cfg.decide.clone().expect("checked above");
+
+        // The sample is the controller's own observe script, so the model and
+        // the rules reason about the same state text.
+        // The page's own clock, so the log answers "was this decision early
+        // enough for the game?" rather than "was it early relative to my loop".
+        let asked_at = match session.evaluate("Math.round(performance.now())").await {
+            Ok(v) => v.as_u64().unwrap_or(0),
+            Err(_) => 0,
+        };
+        let round_start = Instant::now();
+        match session.evaluate(&call_fn(&cfg.observe.script, None)).await {
+            Ok(sample) if !sample.is_null() => {
+                let state = sample.to_string();
+                let options: Vec<(String, String)> = decide
+                    .options
+                    .iter()
+                    .map(|o| (o.id.clone(), o.description.clone()))
+                    .collect();
+                // No extra timeout here on purpose. Only one question is ever
+                // outstanding, so a slow answer cannot pile up; and charging a
+                // sidecar's one-off model load (measured 4.4 s) against a
+                // per-round budget would reject the first decision every time.
+                // The adapter owns its own deadline and restarts a wedged
+                // sidecar, which is the right place for it.
+                match vision
+                    .locate_candidates(&decide.question, &state, "", options)
+                    .await
+                {
+                    Ok(r) => {
+                        // The asker forwards anything that names an option —
+                        // even an id outside the list, even one below any
+                        // floor. It judges nothing: it read its config before
+                        // the call, the policy may have changed since, and it
+                        // cannot know which strategy is in force. Dropping
+                        // answers here would also make a run where the model
+                        // was refused five times look identical to one where it
+                        // was asked twice.
+                        let Some(chosen) = r.choice else {
+                            tracing::info!("decision gave no choice; strategy unchanged");
+                            continue;
+                        };
+                        let _ = out.send(ControllerDecision {
+                            id: chosen,
+                            reason: r.reason,
+                            confidence: r.confidence,
+                            model: r.model,
+                            policy_version: cfg.policy_version,
+                            asked_at_ms: asked_at,
+                            model_ms: round_start.elapsed().as_millis() as u64,
+                        });
+                    }
+                    Err(e) => tracing::warn!(error = %e, "decision model call failed; strategy unchanged"),
+                }
+            }
+            other => {
+                let why = match other {
+                    Ok(_) => "the observe script returned nothing".to_string(),
+                    Err(e) => e.to_string(),
+                };
+                tracing::warn!(error = %why, "decision skipped: no page state to ask about");
+            }
+        }
+
+        // Wait for the next round, a policy change (new option list), or stop.
+        // A closed channel is not a reason to stop asking: the loop re-checks
+        // the cancel flag at the top, which is the authority on whether to run.
+        tokio::select! {
+            _ = tokio::time::sleep(decide.interval()) => {}
+            _ = policy.changed() => {}
+            r = cancel.changed() => {
+                if r.is_err() || *cancel.borrow() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Tick length for a policy. Clamped so a typo cannot turn the loop into a
@@ -132,7 +330,7 @@ pub async fn run(
     cancel: Option<Arc<AtomicBool>>,
     on_summary: impl FnMut(&TickSummary),
 ) -> Result<ControllerOutcome> {
-    run_with_updates(session, policy.clone(), None, cancel, on_summary).await
+    run_with_updates(session, policy.clone(), None, cancel, on_summary, None).await
 }
 
 /// Like [`run`], but the caller can replace the policy mid-run. The controller
@@ -145,6 +343,7 @@ pub async fn run_with_updates(
     mut updates: Option<watch::Receiver<ControllerPolicy>>,
     cancel: Option<Arc<AtomicBool>>,
     mut on_summary: impl FnMut(&TickSummary),
+    mut decisions: Option<tokio::sync::mpsc::UnboundedReceiver<ControllerDecision>>,
 ) -> Result<ControllerOutcome> {
     let started = Instant::now();
     let mut deadline = tighten_deadline(None, started, &policy);
@@ -173,6 +372,12 @@ pub async fn run_with_updates(
     let mut last_rule: Option<(String, Value)> = None;
     let mut window_start = started;
     let mut window_actions = 0usize;
+    let mut rule_activity: Vec<RuleActivity> = Vec::new();
+    // The strategy the model last asked for, and how many decisions it made.
+    // Counted separately from actions because it is a different kind of cost.
+    let mut chosen: Option<ControllerDecision> = None;
+    let mut decision_count = 0u64;
+    let mut decision_log: Vec<DecisionRecord> = Vec::new();
 
     // Pacing is measured from an anchor so a policy that changes `tick_hz`
     // restarts cleanly instead of inheriting the old cadence.
@@ -192,6 +397,9 @@ pub async fn run_with_updates(
             tick_ms_p95: 0,
             tick_ms_max: 0,
             policy_version,
+            decisions: 0,
+            decision_log: Vec::new(),
+            rules: Vec::new(),
             error,
         }
     };
@@ -272,7 +480,162 @@ pub async fn run_with_updates(
             }
         }
 
-        if let Some(s) = &state {
+        // A model decision is part of the page state the rules read, so a rule
+        // branches on it exactly like it branches on `s.x`: no new predicate
+        // language, no race between "the model's view" and the page's.
+        while let Some(mut d) = decisions.as_mut().and_then(|rx| rx.try_recv().ok()) {
+            if d.policy_version != policy.policy_version {
+                // The option list changed under this answer; it is not a
+                // decision about the policy now in force.
+                tracing::info!(
+                    decision = %d.id,
+                    decided_on = d.policy_version,
+                    running = policy.policy_version,
+                    "ignoring a decision from a superseded policy"
+                );
+                decision_log.push(DecisionRecord {
+                    asked_at_ms: d.asked_at_ms,
+                    model_ms: d.model_ms,
+                    applied_at_ms: started.elapsed().as_millis() as u64,
+                    id: d.id,
+                    confidence: d.confidence,
+                    model: d.model,
+                    applied: false,
+                    previous: chosen.as_ref().map(|c| c.id.clone()),
+                    reason: Some(format!(
+                        "answered on policy version {}, which is no longer in force",
+                        d.policy_version
+                    )),
+                });
+                continue;
+            }
+            // One page-clock read per arriving decision (rare), so the three
+            // stamps on a record share one epoch. Mixing the task clock with
+            // the page clock made `applied_at_ms` precede `asked_at_ms` —
+            // impossible-looking, and the actual cause was that the page loads
+            // after the task starts.
+            let at_ms = match session.evaluate("Math.round(performance.now())").await {
+                Ok(v) => v.as_u64().unwrap_or(0),
+                Err(_) => 0,
+            };
+            let holding = chosen.as_ref().map(|c| c.id.clone());
+
+            // An id the author never offered is not a strategy: the rules that
+            // would act on it do not exist. Recorded rather than ignored,
+            // because "the model keeps inventing options" is a diagnosis worth
+            // being able to make from the trace.
+            if !policy
+                .decide
+                .as_ref()
+                .is_some_and(|c| c.options.iter().any(|o| o.id == d.id))
+            {
+                let id = d.id.clone();
+                decision_log.push(DecisionRecord {
+                    asked_at_ms: d.asked_at_ms,
+                    model_ms: d.model_ms,
+                    applied_at_ms: at_ms,
+                    id: id.clone(),
+                    confidence: d.confidence,
+                    model: std::mem::take(&mut d.model),
+                    applied: false,
+                    previous: holding,
+                    reason: Some("not one of this policy's options".to_string()),
+                });
+                tracing::info!(decision = %id, "decision named an option that does not exist");
+                continue;
+            }
+
+            if let Some(c) = policy.decide.as_ref().filter(|c| d.confidence < c.min_confidence) {
+                let (id, confidence, floor) = (d.id.clone(), d.confidence, c.min_confidence);
+                tracing::info!(
+                    decision = %id,
+                    confidence,
+                    floor,
+                    "decision rejected: the strategy stays as it was"
+                );
+                decision_log.push(DecisionRecord {
+                    asked_at_ms: d.asked_at_ms,
+                    model_ms: d.model_ms,
+                    applied_at_ms: at_ms,
+                    id,
+                    confidence,
+                    model: std::mem::take(&mut d.model),
+                    applied: false,
+                    previous: holding,
+                    reason: Some(format!("below min_confidence {floor}, it gave {confidence}")),
+                });
+                continue;
+            }
+
+            let changing = holding.as_deref().is_some_and(|cur| cur != d.id);
+
+            // Hysteresis: changing direction costs more than confirming it.
+            // Only the loop can do this — the asker does not know what is in
+            // force, and a policy update that clears the strategy must not be
+            // judged against a stale one.
+            let switch_floor = match (changing, policy.decide.as_ref()) {
+                (true, Some(c)) => c.switch_confidence,
+                _ => None,
+            };
+            if let Some(sw) = switch_floor.filter(|floor| d.confidence < *floor) {
+                let from = holding.clone().unwrap_or_else(|| "(nothing)".into());
+                tracing::info!(
+                    decision = %d.id,
+                    confidence = d.confidence,
+                    switch_floor = sw,
+                    holding = %from,
+                    "keeping the current strategy: a switch needs more conviction"
+                );
+                decision_log.push(DecisionRecord {
+                    asked_at_ms: d.asked_at_ms,
+                    model_ms: d.model_ms,
+                    applied_at_ms: at_ms,
+                    id: d.id,
+                    confidence: d.confidence,
+                    model: d.model,
+                    applied: false,
+                    previous: holding,
+                    reason: Some(format!(
+                        "switching away from {from} needs confidence {sw}, it gave {}",
+                        d.confidence
+                    )),
+                });
+                continue;
+            }
+
+            tracing::info!(
+                decision = %d.id,
+                confidence = d.confidence,
+                model_ms = d.model_ms,
+                page_ms = d.asked_at_ms,
+                holding = holding.as_deref().unwrap_or("(none)"),
+                switched = changing,
+                "strategy applied"
+            );
+            decision_log.push(DecisionRecord {
+                asked_at_ms: d.asked_at_ms,
+                model_ms: d.model_ms,
+                applied_at_ms: at_ms,
+                id: d.id.clone(),
+                confidence: d.confidence,
+                model: d.model.clone(),
+                applied: true,
+                previous: holding,
+                reason: d.reason.clone(),
+            });
+            chosen = Some(d);
+            decision_count += 1;
+        }
+        let bound = chosen.as_ref().map(|d| {
+            let mut o = state.clone().unwrap_or(Value::Null);
+            if let Some(obj) = o.as_object_mut() {
+                obj.insert("d".into(), Value::String(d.id.clone()));
+                obj.insert("d_confidence".into(), Value::from(d.confidence));
+            }
+            o
+        });
+
+        if let Some(s) = bound.as_ref().or(state.as_ref()) {
             // One round trip for the goal and every rule predicate. A predicate
             // that throws is reported per predicate, not as a failed batch, so
             // the error accounting below is the same as one-call-per-predicate.
@@ -406,6 +769,7 @@ pub async fn run_with_updates(
                     .as_ref()
                     .is_some_and(|(id, fp)| id == &rule.id && fp == &fingerprint);
                 if !fired {
+                    let mut dispatched = 0u64;
                     for action in &rule.actions {
                         // Sliding one-second window: sleep rather than drop
                         // input, because a dropped key_up leaves a key down.
@@ -423,7 +787,9 @@ pub async fn run_with_updates(
                         rt.act(action).await?;
                         actions += 1;
                         window_actions += 1;
+                        dispatched += 1;
                     }
+                    bump(&mut rule_activity, &rule.id, dispatched);
                     last_rule = Some((rule.id.clone(), fingerprint));
                 }
                 if stop.is_some() {
@@ -473,6 +839,9 @@ pub async fn run_with_updates(
 
     let mut outcome = stop.ok_or_else(|| BhError::Other("controller stopped without a reason".into()))?;
     outcome.evals = evals;
+    outcome.rules = rule_activity;
+    outcome.decisions = decision_count;
+    outcome.decision_log = decision_log;
     tick_gaps.sort_unstable();
     outcome.tick_ms_p50 = percentile(&tick_gaps, 50);
     outcome.tick_ms_p95 = percentile(&tick_gaps, 95);

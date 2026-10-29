@@ -54,6 +54,10 @@ def fresh_state() -> dict:
         "form": {"submissions": [], "chaos": [], "applied": []},
         "game": {"reports": 0, "last_report": None, "reports_log": []},
         "canvas": {"clicks": 0, "confirmed": 0, "events": [], "actions": []},
+        # Which of two identically-named controls was acted on. The page has no
+        # other way to tell the harness it picked the right one.
+        "arbiter": {"clicks": []},
+        "plane": {"reports": 0, "last_report": None, "reports_log": []},
     }
 
 
@@ -228,6 +232,14 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 return self._json(200, {"rules": STATE["admin"]["chaos"]})
 
+        if path == "/plane/__state":
+            with LOCK:
+                return self._json(200, STATE["plane"])
+
+        if path == "/arbiter/__state":
+            with LOCK:
+                return self._json(200, STATE["arbiter"])
+
         if path == "/game/__state":
             with LOCK:
                 return self._json(200, STATE["game"])
@@ -263,6 +275,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("game", path[len("/game/") :])
         if path.startswith("/canvas/"):
             return self._static("canvas", path[len("/canvas/") :])
+        if path.startswith("/plane/"):
+            return self._static("plane", path[len("/plane/") :])
+        if path.startswith("/arbiter/"):
+            return self._static("arbiter", path[len("/arbiter/") :])
 
         self._json(404, {"error": "not found", "path": path})
 
@@ -273,6 +289,33 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 STATE["admin"] = fresh_state()["admin"]
             return self._json(200, {"reset": "admin"})
+
+        if path == "/plane/api/report":
+            body = self._body()
+            with LOCK:
+                STATE["plane"]["reports"] += 1
+                STATE["plane"]["last_report"] = body
+                log = STATE["plane"]["reports_log"]
+                log.append(body)
+                del log[:-80]  # the tail is enough to check a strategy worked
+            return self._json(200, {"ok": True})
+
+        if path == "/arbiter/__click":
+            # POST from the page: which of the two same-named buttons was used.
+            body = self._body()
+            with LOCK:
+                STATE["arbiter"]["clicks"].append(str(body.get("id", "")))
+            return self._json(200, {"ok": True})
+
+        if path == "/plane/__reset":
+            with LOCK:
+                STATE["plane"] = fresh_state()["plane"]
+            return self._json(200, {"reset": "plane"})
+
+        if path == "/arbiter/__reset":
+            with LOCK:
+                STATE["arbiter"] = fresh_state()["arbiter"]
+            return self._json(200, {"reset": "arbiter"})
 
         if path == "/form/__reset":
             with LOCK:

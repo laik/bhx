@@ -62,6 +62,11 @@ impl RunOutcome {
 /// a caller that starts a task in the background (the MCP `interactive_*`
 /// tools) must reject a bad spec while it still has someone to answer.
 pub fn check_spec(spec: &TaskSpec) -> Result<()> {
+    // A bad confidence floor would silently turn "only a sure guess" into
+    // "any guess at all", so it is refused before any work starts.
+    if let Some(a) = &spec.policy.arbitrate_ambiguous {
+        a.validate().map_err(BhError::Other)?;
+    }
     match spec.kind {
         TaskKind::Workflow if spec.steps.is_empty() => {
             if spec.mode != "auto" {
@@ -90,6 +95,9 @@ pub fn check_spec(spec: &TaskSpec) -> Result<()> {
                 return Err(BhError::Other(
                     "interactive task has no controller.observe.script".into(),
                 ));
+            }
+            if let Some(d) = &c.decide {
+                d.validate().map_err(BhError::Other)?;
             }
         }
         _ => {}
@@ -418,6 +426,7 @@ impl Engine {
                     id,
                     &runnable,
                     &session,
+                    &vision,
                     opts.cancel,
                     opts.controller_updates,
                     started,
@@ -572,6 +581,18 @@ impl Engine {
                 if let Some(flag) = cancel.clone() {
                     runner = runner.with_cancel(flag);
                 }
+                if let Some(a) = &spec.policy.arbitrate_ambiguous {
+                    // Constructed only when the policy asked: with no arbiter
+                    // attached, an ambiguous locator fails exactly as before.
+                    runner = runner.with_arbiter(std::sync::Arc::new(
+                        bh_exec::arbiter::ModelArbiter::new(
+                            vision.clone(),
+                            spec.goal.clone(),
+                            a.min_confidence,
+                            a.max_candidates,
+                        ),
+                    ));
+                }
                 let report = runner.run_step(&step_id, step, deadline, &mut artifacts).await;
                 (report, runner.take_actions())
             };
@@ -590,6 +611,7 @@ impl Engine {
                         "ok": rec.ok,
                         "elapsed_ms": rec.elapsed_ms,
                         "escalated": rec.escalated,
+                        "arbitration": rec.arbitration,
                         "error": rec.error,
                     }),
                 );
@@ -872,6 +894,7 @@ impl Engine {
         id: &str,
         spec: &TaskSpec,
         session: &bh_browser::Session,
+        vision: &std::sync::Arc<bh_exec::vision::Vision>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         updates: Option<tokio::sync::watch::Receiver<bh_core::ControllerPolicy>>,
         started: Instant,
@@ -880,6 +903,23 @@ impl Engine {
             .controller
             .as_ref()
             .ok_or_else(|| BhError::Other("interactive task has no controller policy".into()))?;
+
+        // A policy that asks for decisions needs the model up **before the page
+        // starts moving**: navigating first and warming on the first question
+        // means the world's opening seconds run with no strategy at all, which
+        // is not a slow decision but a missed one. Measured on the plane task:
+        // a 4.4 s sidecar load paid after navigation put the first accepted
+        // strategy at 5.48 s, past a decision window that closed at 5.22 s,
+        // and the task lost three runs in a row for that reason alone.
+        if policy.decide.is_some() {
+            let failures = vision.warm_for_decisions().await;
+            if !failures.is_empty() {
+                tracing::warn!(
+                    models = %Self::failers(&failures),
+                    "decision models could not be warmed; the loop will still run and ask"
+                );
+            }
+        }
 
         if let Some(url) = &policy.start_url {
             if !spec.policy.host_allowed(url) {
@@ -895,6 +935,10 @@ impl Engine {
         }
 
         self.store.set_task_state(id, "running")?;
+        let mut decision_handle: Option<(
+            tokio::task::JoinHandle<()>,
+            tokio::sync::watch::Sender<bool>,
+        )> = None;
         self.log(
             id,
             "interactive.started",
@@ -911,9 +955,46 @@ impl Engine {
         let mut sink = |t: &TickSummary| {
             self.log_mut(id, "controller.tick_summary", serde_json::to_value(t).unwrap_or(Value::Null));
         };
+        // A model that picks strategies runs beside the loop, never inside it:
+        // the measured cost of one local decision (150–500 ms) is more than
+        // ten ticks, so asking in-line would stop the controller. It also only
+        // starts when the policy asks: a plain rule loop spends no calls and
+        // runs no extra tasks.
+        let decision_rx = if policy.decide.is_some() {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let session2 = session.clone();
+            // With no live-update channel there is nothing to watch, but the
+            // asker still needs the sender to stay alive: a dropped sender
+            // makes `changed()` fail and would end the task after one round.
+            let (policy_tx, policy_rx) = match &updates {
+                Some(rx) => (None, rx.clone()),
+                None => {
+                    let (tx, rx) = tokio::sync::watch::channel(policy.clone());
+                    (Some(tx), rx)
+                }
+            };
+            let vision = vision.clone();
+            let handle = tokio::spawn(async move {
+                let _keep = policy_tx;
+                controller::decision_task(&session2, policy_rx, stop_rx, vision, tx).await;
+            });
+            decision_handle = Some((handle, stop_tx));
+            Some(rx)
+        } else {
+            None
+        };
+
         let outcome =
-            controller::run_with_updates(session, policy.clone(), updates, cancel, &mut sink)
+            controller::run_with_updates(session, policy.clone(), updates, cancel, &mut sink, decision_rx)
                 .await;
+        if let Some((handle, stop_tx)) = decision_handle.take() {
+            let _ = stop_tx.send(true);
+            // The asker polls between rounds, so it stops within one interval;
+            // a stuck model call is waited on rather than aborted, because the
+            // call itself may still hold the sidecar.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        }
 
         let outcome = match outcome {
             Ok(o) => o,
@@ -936,6 +1017,12 @@ impl Engine {
             StopReason::Deadline | StopReason::Anomaly => "failed",
         };
 
+        // Interactive tasks spend the same budget as workflow ones, so the
+        // count has to be written back here too: it was left at 0 while the
+        // stop event reported accepted decisions, which reads as "the model
+        // cost nothing" to anyone reading `task ls` or `stats`.
+        self.store.set_model_calls(id, vision.calls())?;
+
         let summary = json!({
             "task_id": id,
             "state": state,
@@ -956,6 +1043,9 @@ impl Engine {
                 "tick_ms_max": outcome.tick_ms_max,
                 "elapsed_ms": outcome.elapsed_ms,
                 "policy_version": outcome.policy_version,
+                "decisions": outcome.decisions,
+                "decision_log": outcome.decision_log,
+                "rules": outcome.rules,
                 "error": outcome.error,
             }),
         );
@@ -967,6 +1057,12 @@ impl Engine {
             state: state.to_string(),
             report: Some(summary),
         })
+    }
+
+    /// Join model names for a log field; the failures themselves are already
+    /// in the message.
+    fn failers(items: &[String]) -> String {
+        items.join("; ")
     }
 
     fn fail_controller(

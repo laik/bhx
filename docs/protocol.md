@@ -162,6 +162,7 @@ pending | running | waiting_input | waiting_approval | paused
 | `allowed_hosts` | 所有 `navigate` 动作在派发前检查；越界即整任务失败，不做「尝试一下」。 |
 | `max_wall_ms` | 任务级墙钟预算；步骤超时取 `min(step.timeout_ms, 剩余预算)`。 |
 | `semantic_verify` | 可选。全部步骤的结构化成功条件通过后，观察最终页面并让模型判断任务目标（可选附一张视口截图）；占一次模型预算。见下方。 |
+| `arbitrate_ambiguous` | 可选，默认不启用。定位器命中多个元素时默认**直接失败**；启用后可让模型在候选中挑一个，但只有置信度达标才算数。见下方。 |
 
 **成功条件的求值语义**：成功条件是「会变为真」的谓词，不是一次性采样。执行器以
 25→100 ms 退避轮询到 `step.timeout_ms`；下载类条件阻塞等待下载事件本身，但步骤声明了
@@ -237,6 +238,51 @@ sha256 / path），`result.semantic.screenshot` 带同样的字段；存盘的�
 `repair failed: …` 结束，后续步骤不运行。修复调用与视觉、语义校验共享
 `max_model_calls`；没有适配器或预算不足按失败处理，不静默跳过。CLI 的步骤摘要会给
 模型改写的步骤加 `[repaired: succeeded|failed]`。
+
+**歧义定位仲裁（`policy.arbitrate_ambiguous`，2026-10-29 实现）**：`{role:"button", name:"导出"}`
+命中两个按钮时，默认行为是**失败并报出全部候选**——这不是保守，是正确：任务作者写了个页面
+无法区分的定位器，猜一个就是把错误的按钮按下去。可选地让模型来选：
+
+```json
+"arbitrate_ambiguous": { "min_confidence": 0.7, "max_candidates": 8 }
+```
+
+| 字段 | 默认 | 语义 |
+|---|---|---|
+| `min_confidence` | `0.7` | 低于此值就放弃仲裁，原歧义错误照旧。比 `semantic_verify` 的 0.6 高是有意的：这里猜错会**操作错元素**，不只是判错结论 |
+| `max_candidates` | `8` | 超过就不问模型（500 个匹配是定位器写错了，不是一道选择题），且不消耗预算 |
+
+规则（每条都有 `testkit/arbiter-smoke.py` 对应断言）：
+
+- **不启用就不问模型**：`calls == 0`，行为与今天完全一致。
+- **候选来自解析，模型不能增删**：以 `c1..cN` 提供，顺序即解析顺序；答一个没提供过的 id
+  会被路由拒掉，不会派发任何东西。
+- **模型看到的是同一次观察**：解析与仲裁共用一个快照，页面状态文本（`Controls:`）与候选
+  来自同一时刻，不会问完页面又变了。
+- **描述完全相同的候选直接放弃，且不调模型**。这一点是测出来的：两个同名 `导出` 按钮，
+  本地判定模型给出了 0.67 与 0.83 的"自信"答案，且交换提供顺序后仍锁定同一个元素——
+  它读的是 id，不是页面。任何置信度阈值都拦不住这种情况，所以正确做法是放弃并说明
+  该怎么改（用 css / test_id / 限定范围）。
+- **每次仲裁都留在事件里**：`action.executed.arbitration` 带 `strategy` / `eid` / `model` /
+  `confidence` / `candidates` / `reason`。没有它，一次猜出来的点击和一次点名指定的点击
+  在 trace 里长得一模一样。
+- **放弃时说明原因**：低于阈值、候选过多、无法区分、模型不可用，四种情况的修复动作不同，
+  错误里直接写清是哪种。
+- 仲裁占用任务的 `max_model_calls`，与规划、视觉、修复、语义校验同一预算；预算不足即失败。
+
+### 本地判定模型实测（2026-10-29）
+
+同一个两候选问题（`导出 CSV` vs `导出 PDF`，目标"导出为 CSV"），`sidecars/laya/decide.py`
+（torch/MPS）：
+
+| 场景 | 结果 |
+|---|---|
+| 标签可区分（上述） | 选 **c1=PDF**，置信度 **0.625** —— 错的；`min_confidence=0.7` 时放弃，任务不派发 |
+| 标签换成三个候选（含无关按钮） | 选 CSV 0.78、无关项排最后 0.09 —— 说明它确实读标签 |
+| 两个同名按钮，交换提供顺序 | 仍锁定同一元素（0.67 / 0.83）—— 读的是 id，不是页面 |
+
+结论与 `docs/benchmarks.md` 一致：本地判定模型能读文本描述，但在中文后台这种
+**描述几乎相同**的场景不可靠。阈值不是装饰——实测的 0.625 正好落在 0.7 之下。
 
 ## 4. 定位器 Locator
 
@@ -335,13 +381,13 @@ sha256 / path），`result.semantic.screenshot` 带同样的字段；存盘的�
 |---|---|
 | `task.started` / `task.finished` | 生命周期 |
 | `step.started` / `step.finished` | 步骤 |
-| `action.executed` | 单个动作完成：`step_id` / `index` / `type` / `ok` / `elapsed_ms` / `escalated` / `error`；不记动作载荷。在步骤返回后按步骤成组写入，序号与耗时保留真实顺序 |
+| `action.executed` | 单个动作完成：`step_id` / `index` / `type` / `ok` / `elapsed_ms` / `escalated` / `arbitration`（模型代选的痕迹，见第 3 节）/ `error`；不记动作载荷。在步骤返回后按步骤成组写入，序号与耗时保留真实顺序 |
 | `action.failed` | 动作失败（含候选元素、页面快照引用） |
 | `escalation.requested` | 需要模型重新决策 |
 | `approval.requested` / `human.required` | 挂起等人 |
 | `download.completed` | 产物落地 |
 | `controller.tick_summary` | 每秒聚合一次，不是每 tick 一条 |
-| `interactive.started` / `interactive.stopped` | 控制器开始/结束（含 why、ticks、actions、evals、tick 间隔 p50/p95/max） |
+| `interactive.started` / `interactive.stopped` | 控制器开始/结束（含 why、ticks、actions、evals、tick 间隔 p50/p95/max、`rules[]` 逐条命中次数） |
 | `checkpoint.saved` | 检查点落盘 |
 | `approval.decided` | 人工批准/拒绝 |
 | `task.resumed` | 从检查点继续 |
@@ -531,6 +577,15 @@ reason: ...
       "script": "() => window.__gameState()",
       "max_hz": 10
     },
+    "decide": {
+      "question": "先挡哪一条航线？",
+      "options": [
+        { "id": "left",  "description": "守住左侧航线（x=120）" },
+        { "id": "right", "description": "守住右侧航线（x=360）" }
+      ],
+      "every_ms": 1000,
+      "min_confidence": 0.5
+    },
     "goal": { "script": "(s) => s.x >= 120", "deadline_ms": 15000 },
     "rules": [
       { "id": "r1", "when": "s.x < 120", "do": [{ "type":"key_down", "key":"ArrowRight" }], "priority": 10 },
@@ -565,8 +620,51 @@ reason: ...
   否则最后一条「已释放」会随浏览器进程一起消失。
 - **结束原因决定任务状态**：`goal_met` → `succeeded`；`terminal_rule` + 无 goal 脚本 →
   `succeeded`；`deadline` / `anomaly` → `failed`；`canceled` → `canceled`。
+- **模型只被允许选策略，不被允许进 tick**（`controller.decide`，2026-10-29）。见下方单独一节。
 - **interactive 任务不可 resume。** 它没有步骤检查点；把输入流从头重放不是恢复，
   是第二次执行。`task resume` 会直接报错。
+
+### 模型选策略（`controller.decide`）
+
+规则能表达"怎么做"，表达不了"先看哪个"。当页面自己不知道该怎么办时（两个编队同时逼近、
+一个表单有三条可选路径），需要一个模型来选——但**绝不能每 tick 都问**：实测一次本地判定
+150–500 ms，而 30 Hz 的 tick 只有 33 ms。所以这里的分工是固定的：
+
+```
+模型（每 every_ms 一次，最多一个未完成请求） ──> s.d ──> 规则（每 tick）──> 输入
+```
+
+| 字段 | 默认 | 语义 |
+|---|---|---|
+| `question` | — | 问模型的问题；必填 |
+| `options` | — | **作者写好的策略**，≥2 项，`{id, description}`。`id` 限 `[A-Za-z0-9_-]+`，因为它会出现在 `s.d` 里被规则比较 |
+| `every_ms` | `1000` | 询问间隔。低于 250 ms 会被抬到 250：任何实测模型都做不到更频繁，写了也只是永远用上一次的答案 |
+| `min_confidence` | `0.5` | 低于此值**保持上一次策略不变**，不猜测 |
+
+契约：
+
+- **选项由作者枚举**。模型只在已经写了规则的策略里选，答不出规则之外的行为——这是
+  "模型介入"与"模型失控"的分界。
+- **决策写进状态**（`s.d`、`s.d_confidence`），规则用普通 `when` 分支，不新增谓词语言，
+  也不存在"模型的看法"与"页面的事实"两套状态打架。
+- **问在循环外**：单独的后台任务采样并询问，循环只取最新已到达的答案。慢一次是反应迟钝，
+  停下来才是问题；一个请求未完成时不会再发第二个。
+- **采纳的策略版本必须与当前运行的一致**：策略热更新换掉了选项列表，之前那个答案作废。
+- **没有适配器时不失败**：记录一次 `decision model call failed`，循环照跑，`decisions: 0`，
+  没有规则命中策略分支——任务不会因为我没配模型就停下，也不会假装做了什么决定。
+- 每次接受的决策都计入 `max_model_calls` 与 `interactive.stopped.decisions`。
+
+**实测（2026-10-29）**：`testkit/sites/plane/` 两条航线速度不同，"先守哪条"有可测量的收益。
+同一套规则，只把模型的答案换一边：
+
+| 模型选 | 结果（读服务端遥测，不读自述） |
+|---|---|
+| 慢航线（left） | 得分 **3**，两编队全灭 |
+| 快航线（right） | 得分 **0**，两编队飞走 |
+
+真实 Laya（torch/MPS）在同一场景被问 2 次、中途改过策略、得分 3。静态探针里它偏好排在前面的
+选项（换序后答案不变），但**在真实游戏状态前它会用事实**：把两个选项对调后它换到了另一条航线。
+`testkit/decide-smoke.py` 29 项钉住上面每条契约。
 
 **策略热更新（Phase 4）。** 交互任务启动后，`interactive_update_policy` 可以把新策略
 送进正在运行的循环：

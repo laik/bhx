@@ -262,6 +262,22 @@ impl ModelAdapter for LayaSidecar {
         }
         proposal(&reply, req)
     }
+
+    /// Bring the process up before anything needs an answer. The sidecar's own
+    /// handshake now includes a throwaway inference, so reaching "ready" means
+    /// it answers at steady speed rather than merely existing.
+    ///
+    /// Worth spelling out because this function was silently a no-op once: an
+    /// inherent `warm` next to `ask` is never the trait's, and the trait
+    /// default returned Ok(()) — every warm-up measurement taken through it was
+    /// measuring nothing.
+    async fn warm(&self) -> Result<()> {
+        let mut guard = self.child.lock().await;
+        if guard.is_none() {
+            *guard = Some(self.spawn().await?);
+        }
+        Ok(())
+    }
 }
 
 /// One sidecar per configuration for the life of the process.

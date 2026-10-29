@@ -191,6 +191,13 @@ pub struct ActionResult {
 不变量：
 
 - `resolve` 返回 `Ambiguous` 时**不得**自行选第一个。选哪个是 `bh-exec` 的策略，不是驱动层的。
+  任务写了 `policy.arbitrate_ambiguous` 时，`bh-action` 只负责问一个 `LocatorArbiter`
+  （由 `bh-exec` 实现，依赖 `bh-model`——`bh-action` 不依赖 `bh-model`，避免环）；
+  仲裁者**不能自己重新观察页面**，它拿到的候选与状态文本必须来自同一次快照。
+  没有仲裁者、或仲裁者放弃时，仍是原来的歧义错误。
+- 控制器的模型调用**不得发生在 tick 内**。`decision_task` 与循环并行，循环用
+  `try_recv` 取已到达的答案；一次判定实测 150–500 ms，放进 tick 会直接饿死 30 Hz。
+  决策以 `s.d` 注入状态，规则用普通 `when` 分支——不新增谓词语言。
 - `act` 必须先做可执行性检查（可见、稳定、未被遮挡、可接收指针、未 disabled），
   失败返回 `locator.*` / `action.*` 错误，不做静默降级。
 - `act` 遵守 `cancel`：分发前检查一次，分发后若已取消则释放输入并返回 `Canceled`。
@@ -291,13 +298,33 @@ pub async fn run(
 ) -> Result<ControllerOutcome>;
 
 // Phase 4：运行中换策略。只采纳严格更大的 policy_version，且在 tick 边界生效。
+// Phase 6：`decisions` 是模型选策略的通道（`controller.decide`）；没有该字段时为 None，
+// 循环不产生任何额外任务或调用。
 pub async fn run_with_updates(
     session: &Session,
     policy: ControllerPolicy,
     updates: Option<watch::Receiver<ControllerPolicy>>,
     cancel: Option<Arc<AtomicBool>>,
     on_summary: impl FnMut(&TickSummary),
+    decisions: Option<mpsc::UnboundedReceiver<ControllerDecision>>,
 ) -> Result<ControllerOutcome>;
+
+/// 与循环并行运行的询问任务：采样 → 问一次 → 发布结果。循环只取最新到达的答案，
+/// 因此在模型思考期间循环照常跑。同一时刻最多一个未完成请求。
+pub async fn decision_task(
+    session: &Session,
+    policy: watch::Receiver<ControllerPolicy>,
+    cancel: watch::Receiver<bool>,
+    vision: Arc<Vision>,
+    out: mpsc::UnboundedSender<ControllerDecision>,
+);
+
+pub struct ControllerDecision {
+    pub id: String,           // 命中的策略 id（作者写的 options 里的一个）
+    pub confidence: f64,
+    pub model: String,
+    pub policy_version: u64,  // 不是当前版本的答案作废
+}
 
 pub struct ControllerOutcome {
     pub why: StopReason,      // GoalMet | Deadline | Canceled | Anomaly | TerminalRule
@@ -306,9 +333,22 @@ pub struct ControllerOutcome {
     pub actions: u64,
     pub elapsed_ms: u64,
     pub policy_version: u64,  // 停止时实际运行的版本
+    pub decisions: u64,       // 被接受的策略选择次数（与 actions 分开计：不同的成本）
+    pub rules: Vec<RuleActivity>,  // 逐条命中：id / entries / actions
     pub error: Option<String>,
 }
+
+pub struct RuleActivity {
+    pub id: String,
+    pub entries: u64,   // 这条规则被“进入”并派发动作的次数
+    pub actions: u64,   // 它派发过的动作总数
+}
 ```
+
+`rules` 存在的原因是聚合计数会混淆不同的事：40 个动作既可能是 20 次跳跃，也可能是
+19 次跳跃加一次撞死重开——两者都是 key_down+key_up 成对出现。逐规则计数分得开，
+`testkit/interactive-smoke.py` 与 `dino-smoke.py` 就是靠它断言「只有一条规则触发过」
+和「一次都没重开」。
 
 不变量：退出路径（含 panic、取消、超时）都必须释放输入，并留一个页面上报周期
 （350 ms）让释放可见，再交还控制权；`max_actions_per_sec` 是硬上限。

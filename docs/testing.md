@@ -41,12 +41,17 @@ testkit/
 ├── trace-stats-smoke.py    运行历史与 trace（统计口径、action 事件、trace 包、密码不入 trace）
 ├── schedule-smoke.py       定时执行（名字不落盘、缺值拒跑、真实导出、失败不重试、禁用/删除、常驻模式、并发上限）
 ├── remote-smoke.py         远端浏览器（自起 Chrome，http/ws 两种端点、只关自己的标签、坏端点 5 s 内失败）
+├── arbiter-smoke.py        歧义定位仲裁（默认失败、可区分才问、阈值、假 id、错选也如实记录、模型不可用、候选过多、坏策略）
+├── decide-smoke.py         控制器内的模型选策略（两种策略得分不同、不启用即零调用、阈值、假 id、预算、无适配器、坏策略被拒）
 ├── dino-smoke.py           chrome://dino 交互演示（像素观察 + 跳跃规则；需真实 Chrome，不进 run-phase4）
+├── chooser.py              候选选择（Locate）替身：按标签/模式回答、可制造假 id 与低置信（id 不限于 c1..cN）
 └── sites/
     ├── admin/              登录、订单表（async fetch）、筛选、导出 CSV、审计握手、弹窗
     ├── form/               3 页向导：客户端校验 + 服务端 422 校验 + 重提
     ├── game/               canvas 小游戏：键盘移动 + 坐标点击 + 遥测上报
     ├── dino/               chrome://dino 交互任务：canvas 像素 → 跳跃阈值（见该目录 README）
+    ├── arbiter/            两个同名按钮（不可区分）与导出 CSV/PDF（可区分）：仲裁的两面
+    ├── plane/              两条航线速度不同的打飞机：「先守哪条」有可测量收益（策略选择）
     └── canvas/             视觉用例：有/无语义按钮、拖拽、延迟确认、布局 b、DOM 改道
 ```
 
@@ -128,7 +133,7 @@ POST /admin/__chaos
 ./testkit/run-phase1.sh          # Browser Runtime + MCP（6 项）
 ./testkit/run-phase2.sh          # 任务引擎 + 崩溃恢复（14 项）
 ./testkit/run-phase3.sh          # 交互控制器 + 视觉路径（41 项）
-./testkit/run-phase4.sh          # REST + 会话 + trace 统计 + 定时执行 + 远端浏览器 + 规划 + 自动规划 + 语义校验 + Laya + 交互作业 + 自动修复（22 + 47 + 45 + 61 + 17 + 17 + 88 + 62 + 80 + 40 + 112 项）
+./testkit/run-phase4.sh          # REST + 会话 + trace 统计 + 定时执行 + 远端浏览器 + 规划 + 自动规划 + 语义校验 + Laya + 交互作业 + 自动修复 + 歧义仲裁 + 模型选策略（22 + 47 + 45 + 61 + 17 + 17 + 88 + 62 + 80 + 42 + 112 + 48 + 29 项）
 python3 testkit/mcp-smoke.py     # MCP stdio 端到端
 python3 testkit/dino-smoke.py    # chrome://dino 交互演示（需真实 Chrome；不计入上面的项数）
 ```
@@ -342,12 +347,62 @@ criteria、判定写进 `LAYA_STUB_LOG`。这样检查组能同时验证「判�
 | 停止 | `interactive_stop` 返回 `canceled`；页面按键已释放，位置确实移动过 |
 | 谓词批量 | 停止事件里 `evals <= ticks + 1`：目标与所有规则共用一个 JS 往返，不随规则条数增长 |
 | tick 指标 | `tick_ms_p50 <= p95 <= max` 且都为正：循环把抖动报告出来，而不是只报平均值 |
+| 逐规则计数 | 停止事件 `rules[]` 只列出真正触发过的规则（顺序即首次触发顺序），`entries` 与 `actions` 相加等于总动作数：聚合的 `actions` 分不清「20 次跳跃」和「19 次跳跃 + 一次撞死重开」，这个能 |
 | 30 s soak | 目标恒假、持续按住键 30 s：`ticks >= 700`（实测 909）、`evals == ticks`、p50 33 ms / p95 34 ms、结束后 `keys=[]`、服务进程平均 CPU < 100%（实测 3.6%） |
 | 坏请求 | workflow 规格、空 observe 脚本、越界 `start_url`、不存在的 task_id 都在启动前/调用时拒绝 |
 
 「页面看到按键被按住」是服务器真相断言：它证明 `key_down` 真的到达了页面，
 之后的 `keys=[]` 才有意义。热更新检查组先等页面确认移动，再发更新——否则
 浏览器还没启动，测到的只是启动失败。
+
+### Phase 4：歧义定位仲裁
+
+`arbiter-smoke.py` 用两个页面分别证明「什么时候不该问模型」和「问的时候拿到了什么」：
+`/arbiter/` 上两个按钮**同名**（页面上没有任何东西能区分它们），`/arbiter/export/` 上
+是 `导出 CSV` 与 `导出 PDF`（标签能回答问题）。服务端 `/arbiter/__click` 记录到底哪个
+按钮被按下——「选对了」是对站点记录的断言，不是对模型意图的断言。
+
+| 场景 | 断言 |
+|---|---|
+| 不启用 | 没有 `arbitrate_ambiguous` 时仍是原来的歧义错误，`calls == 0`，什么都没点 |
+| 不可区分 | 两个同名按钮：放弃，且**不消耗模型调用**（`calls == 0`）；错误里写清「role 与 name 相同，页面无法区分」并给出改法 |
+| 可区分 | 模型选第二个（CSV）→ 任务成功，站点记录 `["csv"]`；一次调用；候选以 `c1/c2` 带真实标签给出，并带 `Controls:` 页面状态与任务目标 |
+| 只读标签 | 一个只会读「目标里的词 vs 候选标签」的替身也能选对 CSV —— 证明请求携带的信息足够做决定 |
+| 审计 | 点击事件带 `arbitration`：`strategy` / `eid` / `model` / `confidence` / `candidates` / `reason` |
+| 低于阈值 | 0.2 的自信答案被拒，原歧义错误照旧，错误里点名是多少置信度不够 |
+| 假 id | 回答一个没提供过的 id：不派发任何东西 |
+| 选错也如实 | 模型自信地选了两个里的**另一个**（PDF）：确实按它选的按下，事件里能看出这次是猜的 |
+| 模型不可用 | 替身 500：仍按歧义失败，错误说明是模型那一段失败，不会偷偷猜 |
+| 预算 | `max_model_calls=0` 时不仲裁，`calls == 0` |
+| 候选过多 | `max_candidates=1` < 匹配数：拒绝且不花调用，错误说「定位器需要收窄」 |
+| 坏策略 | `min_confidence=1.7` 或 `max_candidates=0` 在开工前就被拒，并指出是哪个字段 |
+
+真实 Laya 在同一个可区分场景上选错了（PDF，0.625），`min_confidence=0.7` 把它拦住；
+换三个候选时它读标签读对了（CSV 0.78，无关项 0.09）。数字见
+[benchmarks.md](benchmarks.md)，这条也是阈值默认取 0.7 的原因。
+
+### Phase 6：控制器里的模型选策略
+
+`decide-smoke.py` 用 `testkit/sites/plane/`：两个编队沿两条速度不同的航线下来，
+"先守哪条"因此有可测量的后果。分数读服务端遥测 `/plane/__state`（页面每 250 ms 上报），
+不是控制器的自述。模型由 `chooser.py` 扮演，所以「它选哪边」是受控变量而不是采样结果。
+
+| 场景 | 断言 |
+|---|---|
+| 策略确实起作用 | 模型选慢航线 → 得分 3、两编队全灭；选快航线 → 得分 0、两编队飞走。**同一套规则**，只有 `options` 顺序和模型答案变了 |
+| 只有被选中的策略在跑 | 停止事件里 `rules[]` 只有 `go-left/hold-left`（或反之），另一条一次没进 |
+| 真的动了 | 遥测里 x 走到对应航线（左 ≤150 / 右 ≥330） |
+| 不启用 | 没有 `decide` 时 `decisions == 0`、没有策略规则触发，且替身调用计数不变 |
+| 没有适配器 | 配了 `decide` 但没有任何模型：任务照常完成、遥测照常上报，`decisions == 0` —— 不会因为没配模型就失败，也不会假装做了决定 |
+| 低于阈值 | `min_confidence` 高于答案置信度 → 不采纳，不改变行为 |
+| 假策略 id | 答案不在 `options` 里 → 忽略 |
+| 预算 | 接受的决策数不超过 `max_model_calls` |
+| 坏策略 | 只有一个选项、空 question、id 含空格/引号/非 ASCII（会进 `s.d` 谓词）→ 开工前拒绝并点名字段 |
+
+真实 Laya（torch/MPS）在同一场景跑过三次，**三次都是 0 分**：第一次选对了，却在火力窗口打开前
+改到另一条航线。单独喂它那一局的中盘状态（`nearest: "left"`）它答对，但只把选项顺序对调，置信度就从
+0.690 掉到 0.511——刚好越过 0.5 的阈值。结论是**策略切换需要迟滞**，不是把阈值调高。
+数字见 [benchmarks.md](benchmarks.md)。
 
 ### Phase 4：自动修复
 

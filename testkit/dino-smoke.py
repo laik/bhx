@@ -87,6 +87,7 @@ def stopped_payload(status: str) -> dict | None:
     return None
 
 
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bhx", default=str(ROOT / "target" / "release" / "bhx"))
@@ -160,6 +161,27 @@ def main() -> int:
             check("tick budget healthy", p95 <= 100, f"p95 {p95} ms")
             check("survived the goal duration", elapsed >= args.seconds * 1000 - 1000,
                   f"{elapsed} ms")
+            # Rule-level counts are what make "it actually played" checkable:
+            # start-or-restart fires once on the title screen and again after a
+            # crash, jump fires once per leap, release once per landing.
+            by_id = {r.get("id"): r for r in (stopped.get("rules") or [])}
+            jumps = int(by_id.get("jump", {}).get("entries", 0))
+            restarts = int(by_id.get("start-or-restart", {}).get("entries", 0))
+            releases = int(by_id.get("release", {}).get("entries", 0))
+            check("jumped repeatedly per rule", jumps >= max(1, args.seconds // 4),
+                  f"{jumps} jump entries")
+            check("started once, never restarted after a crash", restarts == 1,
+                  f"restarts={restarts}")
+            # A run that ends mid-air has one fewer release than jump entries,
+            # and a landing inside the trigger distance re-fires jump, so the
+            # two counts track each other loosely at best. What must not happen
+            # is holding a key with no matching release anywhere.
+            check("jumps were released again", releases >= max(0, jumps - 2),
+                  f"jumps={jumps} releases={releases}")
+            total_rule_actions = sum(int(r.get("actions", 0)) for r in (stopped.get("rules") or []))
+            check("rule actions account for every action",
+                  total_rule_actions == actions,
+                  f"per-rule={total_rule_actions} total={actions}")
         failed = [c for c in checks if not c[1]]
         print(f"\n{len(checks) - len(failed)}/{len(checks)} checks passed")
         return 0 if not failed else 1

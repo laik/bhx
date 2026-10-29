@@ -8,23 +8,45 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bh_browser::Session;
+use async_trait::async_trait;
 use bh_core::{
-    ActionResult, Action, BhError, CmpOp, Condition, ElementInfo, ElementState, Locator,
-    LocatorKind, Modifier, MouseButton, Observation, Point, Rect, ResolveOutcome, ResolvedTarget,
-    Result, Target,
+    ActionResult, Action, Arbitration, ArbitrationContext, ArbitrationDecision, BhError, CmpOp,
+    Condition, ElementInfo, ElementState, Locator, LocatorKind, Modifier, MouseButton, Observation,
+    Point, Rect, ResolveOutcome, ResolvedTarget, Result, Target,
 };
 use bh_observe::Observer;
 use regex::Regex;
+
+/// Called when a locator matches several elements and the task opted into
+/// `arbitrate_ambiguous`. Returning `None` keeps the ordinary "ambiguous
+/// locator" error, which is what a model below its confidence bar must do.
+///
+/// The context carries the observation the candidates came from rather than
+/// letting the arbiter re-observe: a decision that re-reads the page could pick
+/// an element that was never in question, and the state text the model sees
+/// would no longer describe the thing it is choosing between.
+#[async_trait]
+pub trait LocatorArbiter: Send + Sync {
+    async fn choose(&self, ctx: &ArbitrationContext<'_>) -> ArbitrationDecision;
+}
 
 pub struct Runtime<'a> {
     pub session: &'a Session,
     pub observer: &'a mut Observer,
     cancel: Option<Arc<AtomicBool>>,
+    arbiter: Option<Arc<dyn LocatorArbiter>>,
 }
 
 impl<'a> Runtime<'a> {
     pub fn new(session: &'a Session, observer: &'a mut Observer) -> Self {
-        Self { session, observer, cancel: None }
+        Self { session, observer, cancel: None, arbiter: None }
+    }
+
+    /// Only set when the task asked for it. With no arbiter, an ambiguous
+    /// locator fails exactly as it always has.
+    pub fn with_arbiter(mut self, arbiter: Arc<dyn LocatorArbiter>) -> Self {
+        self.arbiter = Some(arbiter);
+        self
     }
 
     /// Cooperative cancellation. The flag is checked before every dispatch and
@@ -64,6 +86,7 @@ impl<'a> Runtime<'a> {
                         bbox: e.bbox,
                         strategy: kind.strategy(),
                         enabled: e.is_enabled(),
+                        arbitration: None,
                     }));
                 }
                 Hit::Many(cands) => {
@@ -226,6 +249,7 @@ impl<'a> Runtime<'a> {
                 bbox: Rect { x: p.x, y: p.y, w: 0.0, h: 0.0 },
                 strategy: "point",
                 enabled: true,
+                arbitration: None,
             }),
             Target::Visual { visual } => Err(BhError::Action(format!(
                 "visual target {visual:?} reached the DOM executor: it must be resolved from a screenshot first"
@@ -235,8 +259,67 @@ impl<'a> Runtime<'a> {
                     .locator()
                     .ok_or_else(|| BhError::LocatorNotFound("empty target".into()))?;
                 let asked = serde_json::to_string(&locator).unwrap_or_default();
-                match self.resolve(&locator).await? {
+                // One observation serves both the match and, if needed, the
+                // arbiter: the page text shown to a model must be the same
+                // snapshot the candidates came from, or it is being asked to
+                // choose between things its context does not describe.
+                let obs = self.observation().await?;
+                match self.resolve_on(&obs, &locator).await? {
                     ResolveOutcome::Unique(t) => Ok(t),
+                    ResolveOutcome::Ambiguous { candidates, strategy } if self.arbiter.is_some() => {
+                        // Only reached when the task set `arbitrate_ambiguous`.
+                        // The candidates are handed over untouched: the model
+                        // chooses among exactly what resolution found.
+                        let ctx = ArbitrationContext {
+                            asked: &asked,
+                            observation: &obs,
+                            options: &candidates,
+                            strategy,
+                        };
+                        let decision = self
+                            .arbiter
+                            .as_ref()
+                            .expect("guarded by is_some")
+                            .choose(&ctx)
+                            .await;
+                        let chosen = match decision {
+                            ArbitrationDecision::Pick(c) => Some(c),
+                            ArbitrationDecision::Decline { note } => {
+                                let why = note.unwrap_or_else(|| "no reason given".into());
+                                return Err(BhError::Other(format!(
+                                    "locator {asked} ambiguous via {strategy}: {} candidates ({}); \
+                                     the arbiter declined: {why}",
+                                    candidates.len(),
+                                    describe(&candidates)
+                                )));
+                            }
+                        };
+                        match chosen.and_then(|c| candidates.get(c.index).cloned().map(|e| (c, e))) {
+                            Some((c, e)) => Ok(ResolvedTarget {
+                                observation_id: obs.id.clone(),
+                                eid: e.eid.clone(),
+                                frame_id: e.frame_id.clone(),
+                                backend_node_id: e.backend_node_id,
+                                bbox: e.bbox,
+                                strategy,
+                                enabled: e.is_enabled(),
+                                arbitration: Some(Arbitration {
+                                    strategy: strategy.to_string(),
+                                    eid: e.eid.clone(),
+                                    model: c.model,
+                                    confidence: c.confidence,
+                                    candidates: candidates.len(),
+                                    reason: c.reason,
+                                }),
+                            }),
+                            None => Err(BhError::Other(format!(
+                                "locator {asked} ambiguous via {strategy}: {} candidates ({}); \
+                                 the arbiter declined to choose",
+                                candidates.len(),
+                                describe(&candidates)
+                            ))),
+                        }
+                    }
                     ResolveOutcome::Ambiguous { candidates, strategy } => Err(BhError::Other(
                         format!(
                             "locator {asked} ambiguous via {strategy}: {} candidates ({})",
@@ -294,13 +377,15 @@ impl<'a> Runtime<'a> {
                 let t = self.require(target).await?;
                 let at = self.settle(&t).await?.center();
                 self.session.click(at, *button, 1).await?;
-                Ok(ActionResult::ok(t.eid, t.strategy).with_elapsed(started.elapsed()))
+                Ok(ActionResult::ok(t.eid, t.strategy)
+                    .with_arbitration(t.arbitration)
+                    .with_elapsed(started.elapsed()))
             }
             Action::Hover { target } => {
                 let t = self.require(target).await?;
                 let at = self.settle(&t).await?.center();
                 self.session.hover(at).await?;
-                Ok(ActionResult::ok(t.eid, t.strategy))
+                Ok(ActionResult::ok(t.eid, t.strategy).with_arbitration(t.arbitration))
             }
             Action::Type { target, text, clear_first } => {
                 let t = self.require(target).await?;

@@ -226,9 +226,12 @@ impl ModelAdapter for OpenAiCompat {
     fn supports(&self, capability: Capability) -> bool {
         match self.kind {
             Kind::Vision => matches!(capability, Capability::Locate | Capability::VisualLocate),
+            // Choosing among listed DOM candidates is a text task: the ids and
+            // descriptions are the whole input. A text model may not be asked
+            // to ground a box in an image, which is what VisualLocate is.
             Kind::Text => matches!(
                 capability,
-                Capability::Plan | Capability::Verify | Capability::Repair
+                Capability::Plan | Capability::Verify | Capability::Repair | Capability::Locate
             ),
         }
     }
@@ -415,6 +418,10 @@ mod tests {
         assert!(text.supports(Capability::Plan));
         assert!(text.supports(Capability::Verify));
         assert!(!text.supports(Capability::VisualLocate));
+        // Choosing between listed candidates is a text task: ids and labels are
+        // the whole input, no pixels involved. Without this a text-only model
+        // could verify a page but not help pick a control on it.
+        assert!(text.supports(Capability::Locate));
     }
 
     #[test]

@@ -12,6 +12,7 @@ APORT="${APORT:-8771}"
 PPORT="${PPORT:-8791}"
 VPORT="${VPORT:-8793}"
 RPORT="${RPORT:-8792}"
+CPORT="${CPORT:-8794}"
 BASE="http://127.0.0.1:$PORT"
 API="http://127.0.0.1:$APORT"
 TMP="$(mktemp -d)"
@@ -26,6 +27,7 @@ cleanup() {
   [ -n "${PLANNER:-}" ] && kill "$PLANNER" 2>/dev/null
   [ -n "${VERIFIER:-}" ] && kill "$VERIFIER" 2>/dev/null
   [ -n "${REPAIRER:-}" ] && kill "$REPAIRER" 2>/dev/null
+  [ -n "${CHOOSER:-}" ] && kill "$CHOOSER" 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -43,6 +45,8 @@ python3 -I testkit/verifier.py --port "$VPORT" >"$TMP/verifier.log" 2>&1 &
 VERIFIER=$!
 python3 -I testkit/repairer.py --port "$RPORT" >"$TMP/repairer.log" 2>&1 &
 REPAIRER=$!
+python3 -I testkit/chooser.py --port "$CPORT" >"$TMP/chooser.log" 2>&1 &
+CHOOSER=$!
 for _ in $(seq 1 100); do
   curl -sf "$BASE/admin/__state" >/dev/null 2>&1 && break
   sleep 0.05
@@ -53,6 +57,10 @@ for _ in $(seq 1 100); do
 done
 for _ in $(seq 1 100); do
   curl -sf "http://127.0.0.1:$PPORT/health" >/dev/null 2>&1 && break
+  sleep 0.05
+done
+for _ in $(seq 1 100); do
+  curl -sf "http://127.0.0.1:$CPORT/health" >/dev/null 2>&1 && break
   sleep 0.05
 done
 for _ in $(seq 1 100); do
@@ -190,6 +198,28 @@ if [ "$RC" -eq 0 ]; then
   pass "repair: success, failed replacement, non-read-only skip, nine rejected proposals"
 else
   fail "repair smoke (exit $RC)"
+fi
+
+echo
+echo "== ambiguity arbitration of a multi-match locator"
+python3 -I testkit/arbiter-smoke.py --bhx ./target/debug/bhx \
+  --site "$BASE" --chooser "http://127.0.0.1:$CPORT" --tmp "$TMP/arbiter"
+RC=$?
+if [ "$RC" -eq 0 ]; then
+  pass "arbiter: default refusal, confident pick, floor, invented id, wrong-but-honoured pick, model down, too many, bad policy"
+else
+  fail "arbiter smoke (exit $RC)"
+fi
+
+echo
+echo "== model-chosen strategy inside an interactive controller"
+python3 -I testkit/decide-smoke.py --bhx ./target/debug/bhx \
+  --site "$BASE" --chooser "http://127.0.0.1:$CPORT" --tmp "$TMP/decide"
+RC=$?
+if [ "$RC" -eq 0 ]; then
+  pass "decide: two strategies score differently, off means zero calls, floor/invented/budget/no-adapter, bad specs refused"
+else
+  fail "decide smoke (exit $RC)"
 fi
 
 echo

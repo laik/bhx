@@ -99,6 +99,29 @@ def main():
               flush=True)
         return
 
+    # `ready` has to mean "answers at steady speed", not "the process is up".
+    # The first forward pass costs ~7 s on torch/MPS (kernel JIT) where later
+    # ones cost ~0.1 s, and a strategy model that answers 7 s after being
+    # asked answers after the moment its decision was about. Measured, not
+    # assumed: warming only the load moved a game's first accepted decision
+    # from 5.9 s to 4.7 s on the page clock, still past a window that closed
+    # at 5.2 s; warming one inference is what makes the first answer fast.
+    # A throwaway request on a throwaway state — it costs the caller startup
+    # they were going to pay anyway, just at a moment nothing depends on it.
+    try:
+        answer(agent, backend, {
+            # Length matters: an MPS kernel is compiled for a sequence length,
+            # so a 7-character warm-up does not warm the path a ~500-character
+            # page state takes. Use a realistic size and two options, which is
+            # what real requests look like here.
+            "state": "Task: warm up the model\nURL: http://127.0.0.1/warm\n"
+                     + ("padding for a realistic sequence length " * 12),
+            "instructions": "warmup",
+            "criteria": {"a": "warmup option a", "b": "warmup option b"},
+        })
+    except Exception:
+        pass  # a failed warm-up must not stop the sidecar from starting
+
     print(json.dumps({"ready": True, "backend": backend}), flush=True)
     for line in sys.stdin:
         line = line.strip()

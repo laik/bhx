@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bh-action = { path = "../bh-action" }
+async-trait = { workspace = true }
 bh-browser = { path = "../bh-browser" }
 bh-core = { path = "../bh-core" }
 bh-model = { path = "../bh-model" }

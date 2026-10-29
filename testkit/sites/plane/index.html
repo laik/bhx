@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>打飞机 · 两条航线</title>
+<style>
+  body { margin:0; font:14px/1.6 -apple-system,"PingFang SC",sans-serif; color:#111827; background:#f9fafb; }
+  main { max-width:560px; margin:20px auto; padding:0 16px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p.hint { color:#6b7280; margin:0 0 12px; }
+  canvas { display:block; border:1px solid #d1d5db; border-radius:8px; background:#fff; width:480px; height:300px; }
+  #hud { margin-top:8px; font-variant-numeric:tabular-nums; color:#6b7280; }
+  #hud b { color:#111827; font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>打飞机 · 两条航线</h1>
+  <p class="hint">飞机自动开火。左右键移动。两个编队沿左右两条航线飞来——<b>先打哪一边是策略，怎么走过去是执行</b>。
+     分数每 250 ms 上报服务器。</p>
+  <canvas id="stage" width="480" height="300"></canvas>
+  <div id="hud">得分 <b id="hs">0</b> · 左编队 <b id="hl">3</b> · 右编队 <b id="hr">3</b> · 位置 <b id="hx">240</b></div>
+</main>
+<script>
+// A deterministic game whose world is a pure function of elapsed time.
+// Two earlier attempts integrated positions per frame; under test load a
+// background tab drops frames, the world then ran slower than the clock, and
+// the outcome measured the machine instead of the policy. Deriving every
+// position from `t` removes that class of flake entirely.
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+const LANES = { left: 120, right: 360 };
+const FIRE_Y = H - 24, SHOT_SPEED = 520, FIRE_EVERY = 350;
+const ESCAPE_Y = H + 20;
+const BAND = 70;                  // how far above the line the cannon reaches
+const GAME_MS = 9000;
+// One number, used both for "can this shot connect" and for "am I covering the
+// lane": if the rules release the key outside the hit window, an aligned player
+// still scores nothing and the strategy looks wrong when the definition was
+// wrong. It also has to exceed the distance the ship travels between controller
+// samples (SHIP_SPEED / observe.max_hz): at 300 px/s and 10 Hz that is 30 px,
+// so the ship overshoots the lane and presses on to the wall.
+const HIT_X = 24;
+const RANGE = HIT_X;
+const SHIP_SPEED = 120;   // px/s — 2 s between lanes, and ≤ 12 px per sample
+
+// The left lane is urgent: it arrives and escapes inside the clock. The right
+// lane is far: it never reaches the firing line before the game ends. So
+// "cover which lane" has an unambiguous payoff — 3 points or 0 — which is what
+// makes the model's answer observable rather than plausible.
+const SPEED = { left: 80, right: 25 };
+
+const START_Y = [-30, -64, -98];
+const game = {
+  x: W / 2,
+  keys: new Set(),
+  startedAt: 0,
+  lastFire: -1e9,
+  shots: [],                     // { x, t0 } — position comes from t0
+  dead: { left: [null, null, null], right: [null, null, null] }, // shot at t, or escaped
+  score: 0,
+  over: false,
+};
+
+const planeY = (side, i, t) => START_Y[i] + (SPEED[side] / 1000) * t;
+
+function aliveCount(side, t) {
+  let n = 0;
+  for (let i = 0; i < 3; i++) {
+    if (game.dead[side][i] != null) continue;
+    if (planeY(side, i, t) > ESCAPE_Y) { game.dead[side][i] = "escaped"; continue; }
+    n++;
+  }
+  return n;
+}
+
+function lead(side, t) {
+  let best = null;
+  for (let i = 0; i < 3; i++) {
+    if (game.dead[side][i] != null) continue;
+    const y = planeY(side, i, t);
+    if (y > ESCAPE_Y) continue;
+    if (!best || y > best.y) best = { x: LANES[side], y: Math.round(y), i };
+  }
+  if (!best) return null;
+  return { x: best.x, y: best.y, etaMs: Math.max(0, Math.round((FIRE_Y - best.y) / (SPEED[side] / 1000))) };
+}
+
+function state(t) {
+  resolve_kills(t);
+  const l = lead("left", t), r = lead("right", t);
+  const leftAlive = aliveCount("left", t), rightAlive = aliveCount("right", t);
+  // Which lane reaches the firing line soonest is a fact the page computes —
+  // the model is never asked to invent it.
+  let nearest = null;
+  if (l && r) nearest = l.etaMs < r.etaMs ? "left" : (r.etaMs < l.etaMs ? "right" : null);
+  else if (l) nearest = "left";
+  else if (r) nearest = "right";
+  return {
+    x: Math.round(game.x),
+    score: game.score,
+    leftAlive, rightAlive,
+    leftLead: l, rightLead: r,
+    nearest,
+    alignedLeft: Math.abs(game.x - LANES.left) <= RANGE,
+    alignedRight: Math.abs(game.x - LANES.right) <= RANGE,
+    elapsedMs: Math.round(t),
+    over: game.over,
+    at: Date.now(),
+  };
+}
+window.__planeState = () => state(performance.now() - game.startedAt);
+
+// Kills are solved in closed form, not sampled per frame. Both the shot and the
+// plane move linearly, so the crossing time is exact:
+//   FIRE_Y - v_s*(t - t0) = y0 + v_p*t   =>   t = (FIRE_Y - y0 + v_s*t0) / (v_s + v_p)
+// Testing overlap at each frame instead would make the score depend on how often
+// the tab happened to paint — under test load a fast plane can sit between two
+// samples and a shot passes straight through it.
+function crossing(s, side, i) {
+  const vs = SHOT_SPEED / 1000, vp = SPEED[side] / 1000;
+  const t = (FIRE_Y - START_Y[i] + vs * s.t0) / (vs + vp);
+  if (t < s.t0) return null;
+  // The shot must still be on screen, the plane not yet past the firing line,
+  // and the two must be horizontally aligned (the shot's x never changes).
+  // The cannon has a range: a hit only counts inside the band above the firing
+  // line. Without this, a shot meets a plane still off the top of the screen
+  // and the slow lane becomes shootable after all, which quietly removes the
+  // whole point of choosing a lane.
+  const yHit = FIRE_Y - vs * (t - s.t0);
+  if (yHit > FIRE_Y + 20 || yHit < FIRE_Y - BAND) return null;
+  if (planeY(side, i, t) > ESCAPE_Y) return null;
+  if (Math.abs(s.x - LANES[side]) > HIT_X) return null;
+  return t;
+}
+
+function resolve_kills(t) {
+  const events = [];
+  for (const side of ["left", "right"]) {
+    for (let i = 0; i < 3; i++) {
+      const esc = (ESCAPE_Y - START_Y[i]) / (SPEED[side] / 1000);
+      if (esc <= t) events.push({ t: esc, kind: "escape", side, i });
+    }
+  }
+  for (const s of game.shots) {
+    if (s.deadAt != null) continue;
+    for (const side of ["left", "right"]) {
+      for (let i = 0; i < 3; i++) {
+        const ti = crossing(s, side, i);
+        if (ti != null && ti <= t) events.push({ t: ti, kind: "hit", side, i, shot: s });
+      }
+    }
+  }
+  // Apply in time order: whoever reaches the firing line first is what the
+  // shot meets, and an escaped plane cannot be shot afterwards.
+  events.sort((a, b) => a.t - b.t);
+  for (const e of events) {
+    if (e.kind === "escape") {
+      if (game.dead[e.side][e.i] == null) game.dead[e.side][e.i] = "escaped";
+      continue;
+    }
+    if (game.dead[e.side][e.i] != null || e.shot.deadAt != null) continue;
+    game.dead[e.side][e.i] = e.t;
+    e.shot.deadAt = e.t;
+    game.score += 1;
+  }
+  game.shots = game.shots.filter((s) => {
+    const y = FIRE_Y - (SHOT_SPEED / 1000) * (t - s.t0);
+    return s.deadAt == null && y >= -20;
+  });
+}
+
+function draw(t) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#e5e7eb";
+  for (const lane of Object.values(LANES)) ctx.fillRect(lane - 1, 0, 2, H);
+  ctx.fillStyle = "#2563eb";
+  for (const s of game.shots) {
+    const y = FIRE_Y - (SHOT_SPEED / 1000) * (t - s.t0);
+    if (y > -10) ctx.fillRect(s.x - 1, y - 4, 2, 8);
+  }
+  for (const side of ["left", "right"]) {
+    ctx.fillStyle = side === "left" ? "#b91c1c" : "#15803d";
+    for (let i = 0; i < 3; i++) {
+      if (game.dead[side][i] != null) continue;
+      const y = planeY(side, i, t);
+      if (y > ESCAPE_Y) continue;
+      const x = LANES[side];
+      ctx.beginPath(); ctx.moveTo(x, y + 9); ctx.lineTo(x - 9, y - 7); ctx.lineTo(x + 9, y - 7); ctx.closePath(); ctx.fill();
+    }
+  }
+  ctx.fillStyle = "#111827";
+  ctx.beginPath(); ctx.moveTo(game.x, FIRE_Y - 6); ctx.lineTo(game.x - 12, FIRE_Y + 12); ctx.lineTo(game.x + 12, FIRE_Y + 12); ctx.closePath(); ctx.fill();
+}
+
+function hud(s) {
+  document.getElementById("hs").textContent = s.score;
+  document.getElementById("hl").textContent = s.leftAlive;
+  document.getElementById("hr").textContent = s.rightAlive;
+  document.getElementById("hx").textContent = s.x;
+}
+
+let lastFrame = 0;
+function frame(now) {
+  const t = now - game.startedAt;
+  if (!game.startedAt) { game.startedAt = now; return requestAnimationFrame(frame); }
+  const dt = Math.max(0, t - lastFrame) / 1000;
+  lastFrame = t;
+
+  if (t > GAME_MS || (aliveCount("left", t) === 0 && aliveCount("right", t) === 0)) {
+    game.over = true; draw(t); hud(state(t)); report(true); return;
+  }
+
+  const vx = SHIP_SPEED;
+  if (game.keys.has("ArrowLeft")) game.x -= vx * dt;
+  if (game.keys.has("ArrowRight")) game.x += vx * dt;
+  game.x = Math.max(12, Math.min(W - 12, game.x));
+
+  if (t - game.lastFire > FIRE_EVERY) { game.lastFire = t; game.shots.push({ x: game.x, t0: t }); }
+  resolve_kills(t);
+  const s = state(t);
+  draw(t); hud(s);
+  requestAnimationFrame(frame);
+}
+
+async function report(final) {
+  const s = state(performance.now() - game.startedAt);
+  try {
+    await fetch("/plane/api/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...s, final: !!final }),
+    });
+  } catch (e) { /* the game keeps playing if the server is unreachable */ }
+}
+setInterval(() => { if (game.startedAt && !game.over) report(false); }, 250);
+
+window.addEventListener("keydown", (e) => {
+  const k = e.key;
+  if (k === "ArrowLeft" || k === "ArrowRight") { game.keys.add(k); e.preventDefault(); }
+});
+window.addEventListener("keyup", (e) => game.keys.delete(e.key));
+window.addEventListener("blur", () => game.keys.clear());
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

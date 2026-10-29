@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+pub mod arbiter;
 pub mod controller;
 pub mod vision;
 
@@ -85,6 +86,10 @@ pub struct ActionRecord {
     pub elapsed_ms: u64,
     /// True when the first attempt failed and a visual fallback was used.
     pub escalated: bool,
+    /// Set when a model chose this action's target out of several matches.
+    /// Without it a guessed click is indistinguishable from a named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arbitration: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -154,6 +159,13 @@ impl<'a> Runner<'a> {
 
     pub fn with_vision(mut self, vision: Arc<Vision>) -> Self {
         self.vision = Some(vision);
+        self
+    }
+
+    /// Let a model choose when a locator matches several elements. Only set
+    /// this when the task asked for it (`policy.arbitrate_ambiguous`).
+    pub fn with_arbiter(mut self, arbiter: Arc<dyn bh_action::LocatorArbiter>) -> Self {
+        self.rt = self.rt.with_arbiter(arbiter);
         self
     }
 
@@ -605,6 +617,7 @@ impl<'a> Runner<'a> {
                             ok: false,
                             elapsed_ms: action_started.elapsed().as_millis() as u64,
                             escalated,
+                            arbitration: None,
                             error: Some(e.to_string()),
                         });
                         return Err(e);
@@ -617,6 +630,7 @@ impl<'a> Runner<'a> {
                 ok: true,
                 elapsed_ms: action_started.elapsed().as_millis() as u64,
                 escalated,
+                arbitration: result.arbitration.clone(),
                 error: None,
             });
             if let (Action::Extract { name, .. }, Some(value)) = (&action, result.value) {

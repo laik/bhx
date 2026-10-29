@@ -1,0 +1,116 @@
+{
+  "protocol_version": "0.1",
+  "kind": "interactive",
+  "goal": "先挡住最快到达火力线的那一队",
+  "policy": {
+    "max_wall_ms": 20000,
+    "max_model_calls": 10,
+    "allowed_hosts": [
+      "127.0.0.1"
+    ]
+  },
+  "controller": {
+    "policy_version": 1,
+    "tick_hz": 30,
+    "start_url": "http://127.0.0.1:{PORT}/plane/",
+    "observe": {
+      "source": "js",
+      "script": "() => window.__planeState()",
+      "max_hz": 20
+    },
+    "decide": {
+      "question": "Which lane should the player cover first?",
+      "options": [
+        {
+          "id": "left",
+          "description": "cover the LEFT lane, at x=120"
+        },
+        {
+          "id": "right",
+          "description": "cover the RIGHT lane, at x=360"
+        }
+      ],
+      "every_ms": 1000,
+      "min_confidence": 0.2
+    },
+    "goal": {
+      "script": "(s) => s.over === true",
+      "deadline_ms": 12000
+    },
+    "rules": [
+      {
+        "id": "game-over",
+        "when": "s.over === true",
+        "do": [
+          {
+            "type": "key_up",
+            "key": "ArrowLeft"
+          },
+          {
+            "type": "key_up",
+            "key": "ArrowRight"
+          }
+        ],
+        "priority": 50,
+        "terminal": true
+      },
+      {
+        "id": "go-left",
+        "when": "s.d === 'left' && !s.alignedLeft",
+        "do": [
+          {
+            "type": "key_down",
+            "key": "ArrowLeft"
+          }
+        ],
+        "priority": 30
+      },
+      {
+        "id": "go-right",
+        "when": "s.d === 'right' && !s.alignedRight",
+        "do": [
+          {
+            "type": "key_down",
+            "key": "ArrowRight"
+          }
+        ],
+        "priority": 30
+      },
+      {
+        "id": "hold-left",
+        "when": "s.d === 'left' && s.alignedLeft",
+        "do": [
+          {
+            "type": "key_up",
+            "key": "ArrowRight"
+          },
+          {
+            "type": "key_up",
+            "key": "ArrowLeft"
+          }
+        ],
+        "priority": 20
+      },
+      {
+        "id": "hold-right",
+        "when": "s.d === 'right' && s.alignedRight",
+        "do": [
+          {
+            "type": "key_up",
+            "key": "ArrowLeft"
+          },
+          {
+            "type": "key_up",
+            "key": "ArrowRight"
+          }
+        ],
+        "priority": 20
+      }
+    ],
+    "safety": {
+      "max_actions_per_sec": 30,
+      "max_duration_ms": 11000,
+      "release_all_on_exit": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>报表</title></head>
+<body>
+<h1>报表</h1>
+<!-- Both match {role: button, name: 导出} (substring match), but the names
+     differ: a step whose goal is "导出为 CSV" can be answered by reading the
+     labels. This is the case arbitration exists for. csv is the correct one.
+     Order is document order on purpose: e1 is the wrong answer here, so a
+     model that only prefers the first match is visible in the result. -->
+<button id="pdf" onclick="tell()">导出 PDF</button>
+<button id="csv" onclick="tell()">导出 CSV</button>
+<script src="/arbiter/report.js"></script>
+</body>
+</html>

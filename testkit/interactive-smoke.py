@@ -296,6 +296,23 @@ def main():
             f"(p50={stopped['tick_ms_p50']} p95={stopped['tick_ms_p95']} "
             f"max={stopped['tick_ms_max']})",
         )
+        # Per-rule activity: an aggregate action count cannot distinguish 20
+        # jumps from 19 jumps plus a crash-and-restart, so the loop reports
+        # which rules actually fired and how often.
+        per_rule = stopped.get("rules") or []
+        ids = [r.get("id") for r in per_rule]
+        check(
+            ids == ["hold"],
+            f"only the rule that fired is listed, once, in fire order (got {ids})",
+        )
+        if per_rule:
+            r = per_rule[0]
+            check(
+                r.get("entries", 0) >= 1 and r.get("actions", 0) == stopped["actions"],
+                f"rule entries and actions add up "
+                f"(entries={r.get('entries')} rule_actions={r.get('actions')} "
+                f"total_actions={stopped['actions']})",
+            )
 
     s = game_state()["last_report"]
     check(s["x"] >= 170, f"the page moved to x={s['x']} (goal was the state, not the harness's word)")

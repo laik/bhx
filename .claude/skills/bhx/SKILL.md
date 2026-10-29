@@ -9,7 +9,7 @@ description: "Drive a real browser through the my-browser-harness engine (bhx): 
 audit trail. Prefer it when the same browser job will run more than once or its result must
 be provable. For exploratory clicking, the `browser-harness` skill is the right tool.
 
-Repo: `/Users/dxp/workspace/go/src/github.com/laik/my-browser-harness`
+Repo: `/Users/dxp/workspace/go/src/github.com/laik/bhx`
 
 ## Locate the binary
 

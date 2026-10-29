@@ -53,6 +53,13 @@ impl Vision {
         &self.router
     }
 
+    /// Bring the model up, if bringing it up costs anything, before it is
+    /// needed. Used by the strategy loop: a decision that arrives after the
+    /// moment it was about is not slow, it is useless.
+    pub async fn warm_for_decisions(&self) -> Vec<String> {
+        self.router.warm(bh_model::Capability::Locate).await
+    }
+
     /// Second opinion on the current page state, with an optional screenshot.
     pub async fn semantic_verify(
         &self,
@@ -71,6 +78,18 @@ impl Vision {
         let png = session.screenshot_png().await?;
         let (width, height) = png_dimensions(&png)?;
         Ok(ImageData { media_type: "image/png", bytes: png, width, height })
+    }
+
+    /// Pick one of a fixed set of candidates for the current task. Used by the
+    /// ambiguity arbiter; the threshold lives with the caller, not here.
+    pub async fn locate_candidates(
+        &self,
+        goal: &str,
+        state: &str,
+        instruction: &str,
+        candidates: Vec<(String, String)>,
+    ) -> Result<bh_model::LocateReport> {
+        bh_model::locate(&self.router, goal, state, instruction, candidates).await
     }
 
     /// Ask for a corrected step. The runner enforces the safety envelope

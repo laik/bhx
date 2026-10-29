@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>报表</title></head>
+<body>
+<h1>报表</h1>
+<!-- Two controls whose accessible names are identical: {role: button,
+     name: 导出} matches both, and *nothing on the page distinguishes them*.
+     That is the case where asking a model is wrong — measured: a local choice
+     model answered confidently (0.67 / 0.83 across two orderings) and stayed
+     tied to the same element, because the descriptions were the same. The
+     arbiter must decline without spending a call. See export.html for the
+     case where arbitration is the right answer. -->
+<button id="wrong" onclick="tell()">导出</button>
+<button id="right" onclick="tell()">导出</button>
+<script src="/arbiter/report.js"></script>
+</body>
+</html>

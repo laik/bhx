@@ -8,6 +8,7 @@ license.workspace = true
 bh-browser = { path = "../bh-browser" }
 bh-core = { path = "../bh-core" }
 bh-observe = { path = "../bh-observe" }
+async-trait = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
