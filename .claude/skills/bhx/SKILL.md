@@ -9,7 +9,7 @@ description: "Drive a real browser through the my-browser-harness engine (bhx): 
 audit trail. Prefer it when the same browser job will run more than once or its result must
 be provable. For exploratory clicking, the `browser-harness` skill is the right tool.
 
-Repo: `/Users/dxp/workspace/go/src/github.com/laik/bhx`
+Repo: https://github.com/laik/bhx (build it with `cargo build --release` in a checkout)
 
 ## Locate the binary
 
@@ -70,7 +70,7 @@ $BHX task artifacts <id>
 
 4. **On failure**, do not just rerun: `task show` names the failing step and error.
    `$BHX task resume <id>` continues from the checkpoint. A crash mid-run does not retry
-   blindly — irreversible actions stay `waiting_human` until `task approve <id>`.
+   blindly — irreversible actions stay `waiting_approval` until `task approve <id>`.
 
 ## Credentials and safety (non-negotiable)
 
@@ -79,11 +79,11 @@ $BHX task artifacts <id>
 - Scheduled runs store only credential *names*; values come from `BH_CRED_<NAME>` at run
   time. A missing value refuses the whole run — it is never typed literally.
 - Keep `allowed_hosts` narrow (the sites the task actually needs).
-- Irreversible actions (submit/delete/pay) must reach `waiting_human`; get explicit user
+- Irreversible actions (submit/delete/pay) must reach `waiting_approval`; get explicit user
   approval before `task approve`.
 - Screenshots (trace bundles, `include_screenshot` verification) contain whatever was on
   screen, possibly personal data. Don't publish or upload them without asking.
-- Login walls, MFA and captchas are never auto-bypassed; they surface as `waiting_human`.
+- Login walls, MFA and captchas are never auto-bypassed; they surface as `waiting_approval`.
 
 ## Models (optional)
 
@@ -136,7 +136,7 @@ low-level `browser_*` only while exploring; `interactive_*` for continuous contr
 ```bash
 $BHX stats --json                 # success rate, p50/p95, model calls, failed-action rate
 $BHX trace <id> --out ./trace-<id>   # self-contained replay package (trace.html)
-./testkit/run-phase4.sh           # 11 groups, real site truth, injected failures
+./testkit/run-phase4.sh           # 13 groups, real site truth, injected failures
 ```
 
 Never claim a workflow works without a successful `task run` and, for changes to the

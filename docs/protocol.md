@@ -63,6 +63,14 @@ pending | running | waiting_input | waiting_approval | paused
 | succeeded | failed | canceled | crashed | recovering
 ```
 
+**`0.1` 实际会出现的**：`pending`（建任务时写入）、`running`、`waiting_approval`、
+`paused`（`task approve` 之后、`task resume` 之前：已批准但还没继续跑）、`succeeded`、`failed`、`canceled`、
+`crashed`（启动时回收被打断的任务，见 [data-model.md §6](data-model.md)）。
+
+**保留值，没有代码路径会写入**：`waiting_input`、`recovering`。列在这里是为了不让实现
+各自发明名字；要用它们得先改这一节。
+`waiting_approval` 在早期文档里叫过 `waiting_human`，线上只有下划线这个名字。
+
 ## 2. 步骤
 
 ```json
@@ -442,8 +450,10 @@ Harness 侧必做校验：
   右/下边界不超过 1（允许 1e-6 的浮点误差）；`choice` 必须等于某个候选 id。
 - 配置：`BH_VLM_URL`、`BH_VLM_MODEL`、`BH_VLM_KEY`、`BH_VLM_TIMEOUT_MS`（默认 8000）。
   不配置时视觉目标会得到明确的「no model adapter configured」，而不是静默降级。
-- 模型层也接受 `locate`（从候选 id 里选一个），但任务执行器还没有走这条路径，
-  DOM 定位仍是本地解析；这是执行器的事，不是模型契约的事。
+- 模型层也接受 `locate`（从候选 id 里选一个）。走这条路径的是**歧义定位仲裁**
+  （`bh-exec::arbiter::ModelArbiter`，按 `policy.arbitrate_ambiguous` 才启用，见 §4 与
+  [roadmap.md](roadmap.md)）：候选可区分且过阈值时才问模型。默认路径仍是本地解析，
+  不配模型也不会改变定位行为；这是执行器的事，不是模型契约的事。
 
 **规划（Phase 4，2026-10-28）**。同一 OpenAI 兼容线格式，只是没有图片、回复更长：
 
@@ -699,7 +709,7 @@ interactive.start        interactive.update_policy  interactive.stop
 
 `browser.execute_actions` 是低级原语，用于单步调试；长流程用 `task.start`。
 
-**实装名用下划线**：`browser_navigate`、`browser_observe`、`browser_execute_actions`、
+**实装名用下划线**（24 个，与 `tools/list` 一致）：`browser_create_session`、`browser_navigate`、`browser_observe`、`browser_execute_actions`、
 `browser_check_condition`、`browser_verify`、`browser_evaluate`、`browser_screenshot`、
 `browser_close`、`browser_run_task`、`task_run`、`task_status`、`task_list`、
 `task_artifacts`、`artifact_list`、`artifact_metadata`、`artifact_fetch`、`task_resume`、

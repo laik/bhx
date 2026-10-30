@@ -172,7 +172,7 @@
 | ~~失败尝试的早期失败信号~~ | ~~Phase 3~~ | ✅ 已在 Phase 2 用 `Step.fail_when` 解决 |
 | `bh-model` 规划 / 修复 | Phase 4 | 本阶段先证明「确定的工作能跑稳」，再让模型写步骤 |
 | 视觉升级、Task Router | Phase 3 | 需要 `bh-exec::vision` 先存在 |
-| trace 产物 | Phase 6 | 事件流已在，但还没有可回放的 trace 格式 |
+| ~~trace 产物~~ | ~~Phase 6~~ | ✅ 已做：`bhx trace` 输出 trace.json + 单文件回放器（见 Phase 6 落地） |
 | 长任务定时执行 | Phase 6 | 状态机与恢复已具备，缺调度 |
 
 ## Phase 3 — 混合执行 ✅ 2026-10-28
@@ -684,5 +684,5 @@ P0 里真正缺的那一件；以及跨 A/B/C/D 的统一对照指标。
 
 1. 更新 `docs/benchmarks.md`（真实数字）。
 2. 跑一遍对应验收子集，记录成功率与指标。
-3. 失败用例写成回归，进 `testkit/suites/`。
+3. 失败用例写成回归，进对应的 `testkit/*-smoke.py`（套件就是文件本身，没有单独的 suites/ 目录）。
 4. 若某阶段退出条件连续两次不达标，**缩小范围**而不是堆代码。

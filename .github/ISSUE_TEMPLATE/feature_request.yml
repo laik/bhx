@@ -1,0 +1,48 @@
+name: Feature or RFC
+description: A new capability, protocol change, or design question
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing, check the two lists that bound this project:
+        **non-goals** (`docs/requirements.md` §2) and **explicitly deferred**
+        (`docs/roadmap.md`).
+        Proposals that contradict them are welcome but will be discussed as design,
+        not implemented as a PR.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem, not the solution
+      placeholder: |
+        What could you not do, and how did you work around it?
+        A task JSON or trace that fails today is worth more than a paragraph.
+    validations: { required: true }
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Which layer would change — protocol, storage, executor, model contract, front door?
+    validations: { required: true }
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Which invariants does this touch?
+      description: |
+        See CONTRIBUTING.md, "Invariants worth keeping":
+        zero model calls on the hot path, verifiable actions, no silent fallback,
+        cancellation with no stuck input, graded side effects, secrets never on disk.
+        If your idea breaks one, say so explicitly and why it is worth it.
+    validations: { required: true }
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How would we know it works?
+      description: A testkit site + assertion, or a measurement to add to docs/benchmarks.md.
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Willingness
+      options:
+        - label: I intend to implement this myself
+        - label: I am fine with this sitting until someone else needs it

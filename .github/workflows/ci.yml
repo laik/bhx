@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      # Unit tests do not need a browser.
+      - run: cargo test --workspace
+
+  style:
+    name: Style (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The tree is not fully rustfmt-clean and clippy has legacy warnings.
+      # These stay advisory until the cleanup commit lands (CONTRIBUTING.md,
+      # good first issues) — new code should still be formatted.
+      - run: cargo fmt --all -- --check
+        continue-on-error: true
+      - run: cargo clippy --workspace --all-targets
+        continue-on-error: true
+
+  acceptance:
+    name: Acceptance suites (headless Chrome)
+    runs-on: ubuntu-latest
+    # These suites have only been run on macOS to date; the Linux browser matrix
+    # is an open item. Flip this to required once it is green twice in a row.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Locate Chrome
+        run: |
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          if [ -z "$CHROME" ]; then
+            sudo apt-get update && sudo apt-get install -y chromium-browser
+            CHROME="$(command -v chromium-browser)"
+          fi
+          echo "BH_CHROME=$CHROME" >> "$GITHUB_ENV"
+          echo "using $CHROME"
+      - name: Phase 1 — browser runtime + MCP
+        run: |
+          set -o pipefail
+          ./testkit/run-phase1.sh 2>&1 | tee /tmp/phase1.log
+      - name: Phase 2 — task engine + recovery
+        run: |
+          set -o pipefail
+          ./testkit/run-phase2.sh 2>&1 | tee /tmp/phase2.log
+      - name: Phase 3 — interactive controller + vision path
+        run: |
+          set -o pipefail
+          ./testkit/run-phase3.sh 2>&1 | tee /tmp/phase3.log
+      - name: Phase 4 — REST/WS, planning, verify, repair, scheduling, trace
+        run: |
+          set -o pipefail
+          ./testkit/run-phase4.sh 2>&1 | tee /tmp/phase4.log
+      - name: Upload suite logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-logs
+          path: /tmp/phase*.log

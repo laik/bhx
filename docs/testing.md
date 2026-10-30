@@ -133,7 +133,7 @@ POST /admin/__chaos
 ./testkit/run-phase1.sh          # Browser Runtime + MCP（6 项）
 ./testkit/run-phase2.sh          # 任务引擎 + 崩溃恢复（14 项）
 ./testkit/run-phase3.sh          # 交互控制器 + 视觉路径（41 项）
-./testkit/run-phase4.sh          # REST + 会话 + trace 统计 + 定时执行 + 远端浏览器 + 规划 + 自动规划 + 语义校验 + Laya + 交互作业 + 自动修复 + 歧义仲裁 + 模型选策略（22 + 47 + 45 + 61 + 17 + 17 + 88 + 62 + 80 + 42 + 112 + 48 + 29 项）
+./testkit/run-phase4.sh          # REST + 会话 + trace 统计 + 定时执行 + 远端浏览器 + 规划 + 自动规划 + 语义校验 + Laya + 交互作业 + 自动修复 + 歧义仲裁 + 模型选策略（22 + 47 + 45 + 61 + 17 + 17 + 88 + 62 + 80 + 42 + 112 + 48 + 39 项）
 python3 testkit/mcp-smoke.py     # MCP stdio 端到端
 python3 testkit/dino-smoke.py    # chrome://dino 交互演示（需真实 Chrome；不计入上面的项数）
 ```

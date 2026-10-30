@@ -1,7 +1,15 @@
 //! `bhx` — the command line front door to the harness.
 //!
-//! Phase 1 surface: observe a page, run a step script. Everything else (tasks,
-//! MCP, models) comes later and does not change these two commands.
+//! One binary, three layers of surface:
+//!
+//! * look at a page: `observe`, `run` (a step script, no task state)
+//! * do work and keep evidence: `task run|ls|show|resume|approve|reject|cancel|
+//!   artifacts|recover`, then `stats` and `trace` to read what happened
+//! * hand it to something else: `mcp` (stdio, for agents), `serve` (REST + WS),
+//!   `schedule` (run a stored task on an interval), `plan` (goal → steps → run)
+//!
+//! The full flag list lives in `USAGE` below and is what `bhx --help` prints —
+//! keep it in sync with the docs rather than restating it there.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;

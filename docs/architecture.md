@@ -1,5 +1,10 @@
 # 架构设计 v0.2
 
+> 读法：本文是**设计说明**（为什么这么切分、考虑过什么替代方案）。
+> 已实现部分的现状以 [protocol.md](protocol.md)（对外）与 [interfaces.md](interfaces.md)（对内）为准；
+> 带「建议」「候选」字样的段落是当初的提案，落地结果紧跟在其后标注。
+> 各阶段的实际交付见 [roadmap.md](roadmap.md)。
+
 ## 1. 总览
 
 ```
@@ -244,11 +249,16 @@ Task
 
 ```
 pending ──► running ──┬──► succeeded
-                      ├──► failed
-                      ├──► canceled
-                      ├──► waiting_approval ──► running | canceled
-                      ├──► waiting_human ──► running
-                      └──► crashed ──► recovering ──► running | failed
+                      ├──► failed            （含 task reject：审批被拒即失败）
+                      ├──► canceled          （task cancel）
+                      ├──► waiting_approval ──(approve)──► paused ──(resume)──► running
+                      │                     └─(reject)─► failed
+                      └──► crashed           （进程重启时 reap_running 把 running 判为 crashed）
+                                              └─(task resume)─► waiting_approval ──► running
+
+`waiting_input` 与 `recovering` 是协议里的保留值，**没有代码路径写入**。
+崩溃恢复走的是 `crashed → waiting_approval`：被打断的那一步不自动重试（副作用可能已经发生），
+必须先有人批准。状态名的规范与可达性写在 [protocol.md §1](protocol.md)。
 ```
 
 **幂等与副作用保护**：不可逆步骤执行前先查该步骤的完成记录；
@@ -299,7 +309,7 @@ Executor 需要什么都由能力声明定义：
 | 异步运行时 | tokio | |
 | 存储 | SQLite（任务、检查点、产物索引）+ 文件系统（产物本体） | 单机足够，易备份 |
 | HTTP / WS | axum | |
-| MCP | 官方 Rust SDK（`rmcp`）为候选；若版本不满足，手写 JSON-RPC over stdio（协议本身很小） | 实现时验证 |
+| MCP | 手写 JSON-RPC over stdio（`crates/bh-server/src/lib.rs`） | ✅ 已实现：未引入 `rmcp`。stdio 上的 MCP 面很小（initialize / tools.list / tools.call），工具表与协议版本放在自己手里更可控；要接 Streamable HTTP 时再评估 SDK |
 | 序列化 | serde + serde_json | 协议即类型 |
 | 可观测 | tracing + JSONL trace + 可选 OpenTelemetry | 每次运行为一个 trace 目录 |
 
@@ -319,7 +329,12 @@ Playwright 真正值得借鉴的是它的**可执行性检查与自动等待**�
 建议：自建薄客户端（约 1–2k 行），只覆盖本项目用到的 Domain，特性检测与控制权都在自己手里。
 若时间紧，先用 `chromiumoxide` 起步，接口层与它隔离，便于替换。
 
-## 5. 代码结构（建议）
+> **落地结果**：自建，**206 行**（`crates/bh-cdp`），比预估小一个数量级——
+> 因为只需要 `Target`、`Browser`、`Page`、`DOM`、`Accessibility`、`Input`、`Runtime`、`Emulation`
+> 八个 Domain，且不做类型生成。Phase 0 的测量依据见 [benchmarks.md](benchmarks.md#cdp-基线phase-0-spike2026-10-28)，
+> 一次性验证代码在仓库根的 `spike/`。
+
+## 5. 代码结构（已实现）
 
 ```
 crates/
@@ -334,10 +349,16 @@ crates/
   bh-server      // REST + WS + MCP
   bhx            // 二进制：CLI + serve
 testkit/
-  sites/         // admin / form / canvas / game / chaos 本地站点
-  suites/        // A/B/C 验收套件
+  server.py      // 站点托管 + 服务端真相 + chaos（标准库）
+  sites/         // admin / form / canvas / game / dino / arbiter / plane（chaos 是 server 的注入端点，不是站点）
+  *-smoke.py     // 各能力的端到端套件；run-phase{1..4}.sh 是入口
+  *.py           // 确定性模型替身：vlm / planner / verifier / repairer / chooser / laya-stub
 docs/
+sidecars/laya/   // 可选的本地决策模型 sidecar（进程外，行协议）
+spike/           // Phase 0 一次性验证代码，不进入产品
 ```
+
+测试侧的完整清单与断言口径见 [testing.md](testing.md)。
 
 依赖方向严格单向，执行器不得反向依赖 Task Engine：
 
@@ -390,9 +411,9 @@ bh-observe  bh-action
 
 ## 8. 命名
 
-本机 `~/.local/bin/browser-harness` 是 browser-use 的 CLI，与本项目无关。
-为免混淆，本项目：
+[browser-use](https://github.com/browser-use) 有一个叫 `browser-harness` 的 CLI（常见安装路径
+`~/.local/bin/browser-harness`），与本项目无关。为避免 PATH 冲突与文档混淆，本项目：
 
-- 仓库名保留 `my-browser-harness`（沿用既有路径）；
-- 二进制名 **`bhx`**；
-- 文档与协议中用「Harness」指本项目，用「browser-use/browser-harness」指另一个项目。
+- 仓库与包名：**`bhx`**（GitHub 上为 `laik/bhx`）；
+- 二进制名：**`bhx`**；
+- 概念上自称 **Harness**，提到另一个项目时写全「browser-use/browser-harness」。

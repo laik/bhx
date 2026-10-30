@@ -25,10 +25,12 @@ SQLite 存**指针和状态**，不存大对象。快照与截图放文件系统
         ├── task.json            任务快照（已剥离凭据）
         ├── events.jsonl         与 events 表同构，便于直接 tail/grep
         ├── tmp/                 下载暂存 + 提取写盘，成功后移入 artifacts/
-        ├── obs/                 预留：观察快照
-        ├── shots/               预留：截图
-        └── artifacts/
-            └── orders-已支付.csv
+        ├── obs/                 预留：观察快照（只建目录，当前为空）
+        ├── shots/               预留：截图（只建目录，当前为空）
+        └── artifacts/           下载本体 **和** 截图都在这里，被产物索引统一记账
+            ├── orders-已支付.csv
+            ├── step-03-s3.jpg         步骤末帧：失败步骤必拍，其余看 policy.trace_screenshots
+            └── verify-final.png       语义校验带图时，存的就是模型看过的那张
 ```
 
 与最初设计的差异，都是实现时做的选择：
@@ -39,7 +41,9 @@ SQLite 存**指针和状态**，不存大对象。快照与截图放文件系统
   否则「这个文件属于哪个任务」要靠文件名猜。
 - **`trace.jsonl` 尚未生成。** 动作级 trace 格式还没定（Phase 6 与回放一起做）；
   现在 diagnostics 走 `events.jsonl`。
-- **`obs/`、`shots/` 只建目录、暂时为空。** Phase 2 没有自动截图，观察快照也不落盘。
+- **`obs/`、`shots/` 只建目录、当前为空。** 观察快照不落盘；截图改放 `artifacts/`
+  并登记进 `artifacts` 表——截图是要被审计的东西，混在产物索引里才有 sha256、
+  才能在 trace 包里一起带走，而不是散在另一个目录里靠路径猜。
 - `tasks/<id>/` 在任务创建时建立；尚无删除任务的功能，`deleted_at` 目前恒为 NULL。
 
 ## 3. 表结构
@@ -184,8 +188,12 @@ CREATE INDEX schedules_by_due    ON schedules(next_run_at_ms) WHERE enabled = 1;
 - 密码框的值在观察阶段就已是 `"***"`（`bh-observe`），不会进入事件或报告。
 - 动作原文目前**不进事件**：`step.started` / `step.finished` 只记 `step_id`、`goal`、
   状态、耗时、错误。因此暂时不需要事件脱敏器；一旦要记动作参数，必须补上写入侧脱敏。
-- 截图默认对 `input[type=password]` 区域打码、`redact_selectors`：**未实现**，
-  因为 Phase 2 不自动截图。
+- 截图默认对 `input[type=password]` 区域打码、`redact_selectors`：**未实现**。
+  现在截图是真实存在的：失败的步骤必定留一张，成功步骤由 `policy.trace_screenshots` 决定，
+  语义校验带图时留 `verify-final.png`（都写进 `tasks/<id>/artifacts/`，见 §2）。
+  所以「屏幕上的密码值会被打码」这件事现在就有影响，不是将来才需要——
+  脱敏只发生在观察侧（`bh-observe`）与落盘前的凭据替换，像素里没有打码。
+  对外承诺写在 [SECURITY.md](../SECURITY.md)「截图是整个屏幕」。
 
 脱敏是写入侧的职责，不是读取侧的。读侧过滤意味着原始凭据已经躺在磁盘上了。
 
@@ -316,7 +324,8 @@ bhx task ls / show <id> / artifacts <id> / resume <id> / approve <id> / cancel <
 bhx task recover                # 列出被崩溃打断的任务
 ```
 
-`bhx serve`（REST + WS）尚未实现，Phase 4 与 MCP 全量工具面一起做。
+`bhx serve`（REST + WS）已实现（Phase 4）：`bhx serve [--addr 127.0.0.1:8765] [--home DIR]`。
+路由与语义是规范性的，写在 [protocol.md §10](protocol.md)；这里只列入口，避免两处各写一遍。
 
 Claude Code 侧：
 

@@ -3,3 +3,9 @@
 .DS_Store
 *.log
 .bhx/
+__pycache__/
+*.pyc
+# a bhx home accidentally created at the repo root
+/bhx.db
+/bhx.db-shm
+/bhx.db-wal

@@ -637,3 +637,75 @@ trace JSON 里搜不到输入的密码：动作事件只记类型与耗时，不
    `Vec<u8>`，sha256 三方相同；回放与追责都指向同一个文件。
 3. **没有视觉的后端必须失败，不能退化成文字判定。** Laya 明确拒绝图片，且根本不启动
    sidecar；这次尝试仍按「按尝试计」扣预算，但不会产生一个假装看过图的 verdict。
+
+## 开源前复核（2026-10-30）
+
+同一台机器（Apple M5 / 16 GB / arm64，Darwin 25.5.1），新环境：
+**Rust 1.93**、Chrome **156.0.8078.73**、Python **3.14.6**。
+目的是确认 0.1.0 的公开数字在新版本浏览器上仍然成立，并给出 README 顶部那条命令的真实输出。
+
+### 环境与版本：1.85 已经不是可用的最低版本
+
+`cargo build --workspace` 在 rustc 1.85.0 上**连依赖都解析不过**：
+
+```
+error: rustc 1.85.0 is not supported by the following packages:
+  libsqlite3-sys@0.39.1 requires rustc 1.88.0
+  rusqlite@0.41.0 requires rustc 1.89.0
+  sha2@0.11.1 requires rustc 1.88
+```
+
+1.89.0 上 `cargo build --workspace` 与 `cargo test --workspace`（98 个单元测试）全部通过。
+文档里的「Rust 1.85+」已改为 **1.89+**——这是当前 Cargo.lock 的实际下限，不是代码的下限。
+要回到 1.85，得 `cargo update --precise` 把 rusqlite 钉回旧版；那属于依赖策略决定，
+留给需要它的下游。
+
+### A3 任务（登录 → 筛选 → 导出 CSV），release 构建
+
+`bhx task run testkit/sites/admin/task.json`，每任务新起 headless Chrome，独立 `--home`：
+
+| 轮次 | 总耗时 | 说明 |
+|---|---:|---|
+| 第 1 次（冷） | **1366 ms** | 与 2026-10-28 的观察一致：冷启动那一次明显偏高 |
+| 之后 3 次 | **591 / 666 / 774 ms** | 模型调用 0 次，`task show --json` 的 `model_calls` = 0 |
+
+可比的历史数字是 Phase 2 的 A3（同一个用例，`bhx task run`，**debug 构建**）：
+815 ms，范围 660–1127。本次 release 构建暖机 591–774、冷启动 1366：
+**同一量级，Chrome 156 + Rust 1.93 没有引入回归**；release 比 debug 略快，差值不超过
+构建方式本身能解释的范围，所以不把它当成优化。
+
+`bhx run`（不落任务状态，同一条命令、release 构建）：
+
+| 轮次 | 总耗时 |
+|---|---:|
+| 连续 4 次 | **199 / 204 / 215 / 231 ms** |
+
+对照 Phase 1 的 debug 构建 202 / 271 / 218 ms：release 只快了一点。
+这条路径的成本是 **Chrome 启动 + 首次导航**（Phase 1 自己量过：0.9–1.8 s 的一次性成本，
+在这个热站点上落到 ~150 ms），不是 harness 的逐步开销。
+
+结论：
+
+1. **README 顶部的示例现在是真的。** 之前写的 `SUCCEEDED in 1153 ms … model calls: 0`
+   那行既不是任何一次真实输出（`task run` 不打印 model calls），也落在测量区间之外——
+   已换成真实输出与 `task show --json | jq .model_calls` 的查法。
+2. **`task run` 比 `run` 贵 3 倍左右（591–774 vs 199–231 ms）。** 差的是 SQLite 建库、
+   任务落盘、每步检查点、产物索引和失败步骤的强制截图——都是「可恢复、可审计」的价钱。
+   只要结果不要求可审计，就用 `bhx run`；要留证据、要能 resume，才付这个成本。
+3. **数字要标明构建方式。** 之前 README 把 debug 的 `bhx run` 数字和 `task run` 混在
+   同一行，读者会以为持久任务也是 0.2 s。表格已分成两行，各自写命令与构建。
+
+### 验收套件复跑（同一台机器，全部通过）
+
+| 套件 | 结果 |
+|---|---|
+| `cargo test --workspace` | 98 passed, 0 failed |
+| `run-phase1.sh` | 6 / 6 |
+| `run-phase2.sh` | 14 / 14 |
+| `run-phase3.sh` | 41 / 41 |
+| `run-phase4.sh` | 13 组，其中最后一组（`decide`）39 项断言（文档原写 29，已按实跑改为 39） |
+
+前 12 组与 2026-10-28 记录的项数逐一相符（22/47/45/61/17/17/88/62/80/42/112/48），
+没有测试被删或跳过。最后一组 `decide` 实跑 39 项，文档原写 29——那是当时按用例条目
+估的数，不是实跑结果；已按本次实跑改成 39。教训和 [testing.md §8](testing.md) 是同一条：
+**没跑过的数字不算测量**。

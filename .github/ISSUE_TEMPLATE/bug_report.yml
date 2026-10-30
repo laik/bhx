@@ -1,0 +1,50 @@
+name: Bug report
+description: Something the harness did that it should not have (or failed to do)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A bug report is only actionable here if it is **reproducible against the local
+        test sites** or comes with a trace. Public-site bugs usually mean the task
+        spec, not the harness — that is a discussion, not a bug.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Expected vs actual, in those two words.
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        The exact command, the task JSON (or a diff against
+        `testkit/sites/.../task.json`), and whether it reproduces against a
+        `testkit` site. Paste `bhx --version` output and `uname -m`.
+      value: |
+        ```bash
+        bhx --version
+        uname -m
+        # command
+        ```
+        ```json
+        // task spec
+        ```
+    validations: { required: true }
+  - type: textarea
+    id: trace
+    attributes:
+      label: Trace / events
+      description: |
+        `bhx trace <task-id> --out ./trace-<task-id>` and paste the failing step's
+        event line, or the `bhx task show <id> --json` error block.
+        Remove anything sensitive: screenshots and observations can contain data
+        from your screen.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which entry point
+      multiple: true
+      options: [CLI, MCP, REST/WebSocket, task engine, observation, action/locator, vision, interactive controller, model layer, scheduling, docs only]
+    validations: { required: true }
